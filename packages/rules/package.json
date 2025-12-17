@@ -1,0 +1,20 @@
+{
+  "name": "@poker/rules",
+  "version": "1.0.0",
+  "description": "13 MOD LOCKED rule engine",
+  "type": "module",
+  "main": "dist/index.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "typescript": "^5.5.4"
+  }
+}
+
