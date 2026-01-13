@@ -1179,10 +1179,17 @@ wss.on('connection', (ws: WebSocket) => {
       const parseResult = ClientMessageSchema.safeParse(rawMessage);
 
       if (!parseResult.success) {
+        // Log the invalid message for debugging
+        app.log.warn({
+          invalidMessage: rawMessage,
+          error: parseResult.error.errors,
+          receivedType: rawMessage?.type,
+        }, 'Invalid WebSocket message received');
+        
         const errorMessage: ErrorMessage = {
           type: 'ERROR',
           code: 'INVALID_MESSAGE',
-          message: parseResult.error.message,
+          message: `Invalid message format: ${parseResult.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('; ')}. Received type: ${rawMessage?.type || 'undefined'}. Expected one of: HELLO, PING, READY, PLAY, PASS, SET_RULES, SYNC_REQUEST`,
         };
         ws.send(JSON.stringify(errorMessage));
         return;
