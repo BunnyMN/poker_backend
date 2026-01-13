@@ -26,10 +26,12 @@
    - Go to Settings → Source
    - **Root Directory**: Leave empty or set to `poker_backend` (deploy from monorepo root)
    - Go to Settings → Build
+   - **Builder**: Railway will auto-detect (Railpack) - no need to specify NIXPACKS
    - Build Command: `npm install && cd packages/rules && npm install && npm run build && cd ../../apps/server && npm install && npm run build`
    - Start Command: `cd apps/server && npm start`
    - **Note**: Railway will use `railway.json` or `railway.toml` if present, which already have the correct commands
    - **CRITICAL**: Must deploy from `poker_backend` root directory, NOT from `apps/server`
+   - **Note**: Railway now uses Railpack (not Nixpacks) - the config files have been updated to remove deprecated NIXPACKS builder
 
 4. **Set Environment Variables**
    - Go to Variables tab

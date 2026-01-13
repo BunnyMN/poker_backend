@@ -1,5 +1,4 @@
 [build]
-builder = "NIXPACKS"
 buildCommand = "npm install && cd packages/rules && npm install && npm run build && cd ../../apps/server && npm install && npm run build"
 
 [deploy]
