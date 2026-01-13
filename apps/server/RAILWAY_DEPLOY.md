@@ -22,12 +22,14 @@
    - Select your repository
    - Railway will auto-detect Node.js
 
-3. **Configure Build Settings** (Optional - Railway will auto-detect)
+3. **Configure Build Settings** (IMPORTANT - Must build from root)
+   - Go to Settings → Source
+   - **Root Directory**: Leave empty or set to `poker_backend` (deploy from monorepo root)
    - Go to Settings → Build
-   - Build Command: `npm run build` (from root, uses root package.json)
-   - Start Command: `npm start` (from root, uses root package.json)
-   - Root Directory: Leave empty (deploy from `poker_backend` root)
-   - **Note**: Railway will use the `railway.json` or root `package.json` scripts automatically
+   - Build Command: `npm install && cd packages/rules && npm install && npm run build && cd ../../apps/server && npm install && npm run build`
+   - Start Command: `cd apps/server && npm start`
+   - **Note**: Railway will use `railway.json` or `railway.toml` if present, which already have the correct commands
+   - **CRITICAL**: Must deploy from `poker_backend` root directory, NOT from `apps/server`
 
 4. **Set Environment Variables**
    - Go to Variables tab
@@ -105,11 +107,23 @@ Required environment variables:
 
 ## Build Configuration
 
+**IMPORTANT**: Railway MUST deploy from the `poker_backend` root directory, NOT from `apps/server`.
+
 Railway will automatically:
-1. Install dependencies for both packages
-2. Build rules package first
-3. Build server TypeScript: `npm run build`
-4. Start server: `npm start`
+1. Install root dependencies: `npm install`
+2. Build rules package: `cd packages/rules && npm install && npm run build`
+3. Build server TypeScript: `cd apps/server && npm install && npm run build`
+4. Start server: `cd apps/server && npm start`
+
+The build process is defined in:
+- `railway.json` (root)
+- `railway.toml` (root)
+- `nixpacks.toml` (apps/server - fallback)
+
+**If deploying from wrong directory:**
+- WebSocket messages may fail validation
+- Rules package won't be built
+- Server may start but game logic won't work
 
 ## WebSocket Configuration
 
@@ -131,10 +145,15 @@ Railway will use the `/health` endpoint for health checks:
 ## Troubleshooting
 
 ### Build Fails
+- **CRITICAL**: Verify Railway is deploying from `poker_backend` root directory (Settings → Source → Root Directory should be empty or `poker_backend`)
 - Check that `tsconfig.json` is correct
 - Ensure all dependencies are in `package.json`
 - Verify the monorepo structure is correct
-- Check build logs in Railway dashboard
+- Check build logs in Railway dashboard - should see:
+  1. Building rules package
+  2. Building server
+  3. Both successful
+- If only seeing server build, Railway is deploying from wrong directory
 
 ### Server Won't Start
 - Verify `SUPABASE_JWT_SECRET` is set correctly
@@ -146,6 +165,11 @@ Railway will use the `/health` endpoint for health checks:
 - Ensure Railway domain supports WebSocket (it does by default)
 - Check that the frontend uses `wss://` (secure WebSocket) for production
 - Verify the WebSocket path is `/ws`
+- **If getting "INVALID_MESSAGE" errors with only HELLO/PING/READY:**
+  - Backend was deployed from wrong directory
+  - Rules package wasn't built
+  - Server code is outdated
+  - **Solution**: Redeploy from `poker_backend` root directory
 
 ## Updating Frontend
 
