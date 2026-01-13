@@ -39,7 +39,7 @@ import {
   classifyFiveCardHand,
   compareFiveCardHands,
   type FiveCardKind,
-} from '../../../packages/rules/src/index.js';
+} from '../../../packages/rules/dist/index.js';
 
 const app = Fastify({
   logger: true,

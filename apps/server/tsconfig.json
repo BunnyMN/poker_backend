@@ -4,7 +4,7 @@
     "module": "ES2022",
     "lib": ["ES2022"],
     "moduleResolution": "node",
-    "rootDir": "../..",
+    "rootDir": "./src",
     "outDir": "./dist",
     "strict": true,
     "esModuleInterop": true,
@@ -19,7 +19,7 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*", "../../packages/rules/src/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }
 
