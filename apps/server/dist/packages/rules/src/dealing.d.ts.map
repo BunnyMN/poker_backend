@@ -1,1 +1,0 @@
-{"version":3,"file":"dealing.d.ts","sourceRoot":"","sources":["../../../../../../packages/rules/src/dealing.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,IAAI,EAAE,MAAM,WAAW,CAAC;AAEtC;;;GAGG;AACH,wBAAgB,SAAS,CACvB,SAAS,EAAE,MAAM,EAAE,EACnB,IAAI,EAAE,IAAI,EAAE,GACX;IAAE,KAAK,EAAE,MAAM,CAAC,MAAM,EAAE,IAAI,EAAE,CAAC,CAAC;IAAC,aAAa,EAAE,IAAI,EAAE,CAAA;CAAE,CAwB1D"}
