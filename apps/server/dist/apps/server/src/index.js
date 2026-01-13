@@ -12,6 +12,40 @@ const app = Fastify({
 app.get('/health', async () => {
     return { ok: true };
 });
+// HTTP: Version/debug endpoint to verify deployed code
+app.get('/version', async () => {
+    // Test if all message schemas are available
+    const testMessages = [
+        { type: 'HELLO', roomId: 'test', accessToken: 'test' },
+        { type: 'PING' },
+        { type: 'READY', roomId: 'test', isReady: true },
+        { type: 'PLAY', roomId: 'test', cards: [] },
+        { type: 'PASS', roomId: 'test' },
+        { type: 'SET_RULES', roomId: 'test', scoreLimit: 10 },
+        { type: 'SYNC_REQUEST', roomId: 'test' },
+    ];
+    const supportedTypes = [];
+    const unsupportedTypes = [];
+    for (const msg of testMessages) {
+        const result = ClientMessageSchema.safeParse(msg);
+        if (result.success) {
+            supportedTypes.push(msg.type);
+        }
+        else {
+            unsupportedTypes.push(msg.type);
+        }
+    }
+    return {
+        ok: true,
+        version: '1.0.0',
+        supportedMessageTypes: supportedTypes,
+        unsupportedMessageTypes: unsupportedTypes,
+        totalSupported: supportedTypes.length,
+        expectedTotal: 7,
+        nodeVersion: process.version,
+        timestamp: new Date().toISOString(),
+    };
+});
 // WebSocket server
 const wss = new WebSocketServer({ noServer: true });
 // Track authenticated connections
