@@ -325,14 +325,6 @@ export type SyncStateMessage = {
     yourHand: Card[] | null;
     starterPlayerId?: string;
     starterReason?: 'WINNER' | 'WEAKEST_SINGLE';
-    turnEndsAt?: number;
-};
-export type TurnTimerMessage = {
-    type: 'TURN_TIMER';
-    roomId: string;
-    currentTurnPlayerId: string;
-    turnEndsAt: number;
-    durationMs: number;
 };
 export type ActionErrorMessage = {
     type: 'ACTION_ERROR';
@@ -344,5 +336,5 @@ export type ErrorMessage = {
     code: string;
     message?: string;
 };
-export type ServerMessage = WelcomeMessage | StateMessage | RoomStateMessage | RoundStartMessage | DealtMessage | GameStateMessage | PersonalStateMessage | RoundEndMessage | RulesMessage | ScoreUpdateMessage | RoomOverviewMessage | SyncStateMessage | TurnTimerMessage | ActionErrorMessage | ErrorMessage;
+export type ServerMessage = WelcomeMessage | StateMessage | RoomStateMessage | RoundStartMessage | DealtMessage | GameStateMessage | PersonalStateMessage | RoundEndMessage | RulesMessage | ScoreUpdateMessage | RoomOverviewMessage | SyncStateMessage | ActionErrorMessage | ErrorMessage;
 //# sourceMappingURL=protocol.d.ts.map

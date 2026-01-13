@@ -23,8 +23,6 @@ export interface Room {
     currentTurnPlayerId?: string;
     lastPlay?: LastPlay | null;
     passedSet?: Set<string>;
-    turnEndsAt?: number;
-    turnTimer?: NodeJS.Timeout | null;
 }
 export declare function getOrCreateRoom(roomId: string): Room;
 export declare function addClientToRoom(roomId: string, ws: WebSocket, playerId: string): {

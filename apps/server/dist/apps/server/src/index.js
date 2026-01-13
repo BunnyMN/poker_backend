@@ -5,8 +5,6 @@ import { verifyAccessToken } from './jwt.js';
 import { ClientMessageSchema, } from './protocol.js';
 import { addClientToRoom, broadcastRoomState, checkAndBroadcastRoundStart, getRoom, removeClientFromRoom, setPlayerReady, } from './rooms.js';
 import { createDeck, shuffle, dealHands, determineStarter, compareSingle, isPair, isSet, comparePair, compareSet, classifyFiveCardHand, compareFiveCardHands, } from '../../../packages/rules/src/index.js';
-// Turn timer constants
-const TURN_DURATION_MS = 20000; // 20 seconds
 const app = Fastify({
     logger: true,
 });
@@ -65,8 +63,6 @@ async function dealAndSendCards(roomId) {
     room.currentTurnPlayerId = starter.starterPlayerId;
     room.lastPlay = null;
     room.passedSet = new Set();
-    // Start turn timer for starter
-    startTurnTimer(roomId);
     // Send DEALT message to each seated player using their active connection
     for (const playerId of seatedPlayerIds) {
         const playerHand = hands[playerId];
@@ -218,21 +214,9 @@ function sendSyncState(roomId, playerId, ws) {
         yourHand,
         starterPlayerId: room.starterPlayerId,
         starterReason: room.starterReason,
-        turnEndsAt: room.turnEndsAt,
     };
     ws.send(JSON.stringify(syncState));
     app.log.info(`SYNC_STATE sent: roomId=${roomId}, playerId=${playerId}`);
-    // Also send TURN_TIMER after SYNC_STATE to ensure UI is in sync
-    if (room.phase === 'playing' && room.currentTurnPlayerId && room.turnEndsAt) {
-        const turnTimerMessage = {
-            type: 'TURN_TIMER',
-            roomId,
-            currentTurnPlayerId: room.currentTurnPlayerId,
-            turnEndsAt: room.turnEndsAt,
-            durationMs: TURN_DURATION_MS,
-        };
-        ws.send(JSON.stringify(turnTimerMessage));
-    }
 }
 /**
  * Broadcast ROOM_OVERVIEW to ALL connected clients (including queued players)
@@ -296,155 +280,6 @@ function broadcastRoomOverview(roomId) {
     }
 }
 /**
- * Clear existing turn timer for a room
- */
-function clearTurnTimer(roomId) {
-    const room = getRoom(roomId);
-    if (!room) {
-        return;
-    }
-    if (room.turnTimer) {
-        clearTimeout(room.turnTimer);
-        room.turnTimer = null;
-    }
-}
-/**
- * Broadcast TURN_TIMER to all clients in room
- */
-function broadcastTurnTimer(roomId) {
-    const room = getRoom(roomId);
-    if (!room || room.phase !== 'playing' || !room.currentTurnPlayerId || !room.turnEndsAt) {
-        return;
-    }
-    const turnTimerMessage = {
-        type: 'TURN_TIMER',
-        roomId,
-        currentTurnPlayerId: room.currentTurnPlayerId,
-        turnEndsAt: room.turnEndsAt,
-        durationMs: TURN_DURATION_MS,
-    };
-    const message = JSON.stringify(turnTimerMessage);
-    for (const client of room.clients) {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
-    }
-}
-/**
- * Find the weakest single card in a hand
- */
-function findWeakestSingleCard(hand) {
-    if (hand.length === 0) {
-        return null;
-    }
-    let weakest = hand[0];
-    for (let i = 1; i < hand.length; i++) {
-        if (compareSingle(hand[i], weakest) < 0) {
-            weakest = hand[i];
-        }
-    }
-    return weakest;
-}
-/**
- * Handle turn timer timeout - auto-pass or auto-play weakest single
- */
-function handleTurnTimerTimeout(roomId) {
-    const room = getRoom(roomId);
-    if (!room || room.phase !== 'playing') {
-        return;
-    }
-    if (!room.currentTurnPlayerId || !room.hands || !room.seatedPlayerIds) {
-        return;
-    }
-    const playerId = room.currentTurnPlayerId;
-    const hand = room.hands[playerId];
-    // If player has 0 cards, advance turn and restart timer
-    if (!hand || hand.length === 0) {
-        // This shouldn't happen normally, but handle gracefully
-        room.currentTurnPlayerId = getNextActivePlayer(playerId, room.seatedPlayerIds, room.hands);
-        startTurnTimer(roomId);
-        return;
-    }
-    if (room.lastPlay) {
-        // Auto PASS
-        app.log.info(`[AUTO] pass: roomId=${roomId}, playerId=${playerId}`);
-        // Mark player as passed
-        room.passedSet?.add(playerId);
-        // Check if trick should end
-        checkAndHandleTrickEnd(roomId);
-        // If trick didn't end, move to next active player
-        if (room.phase === 'playing') {
-            const roomAfterCheck = getRoom(roomId);
-            if (roomAfterCheck && roomAfterCheck.lastPlay) {
-                room.currentTurnPlayerId = getNextActivePlayer(playerId, room.seatedPlayerIds, room.hands);
-            }
-        }
-        // Broadcast game state
-        broadcastGameState(roomId);
-        broadcastRoomOverview(roomId);
-        // Restart timer for next player
-        startTurnTimer(roomId);
-    }
-    else {
-        // Auto PLAY weakest single card
-        const weakestCard = findWeakestSingleCard(hand);
-        if (!weakestCard) {
-            // No cards (shouldn't happen), but handle gracefully
-            return;
-        }
-        app.log.info(`[AUTO] play: roomId=${roomId}, playerId=${playerId}, card=${weakestCard.rank}${weakestCard.suit}`);
-        // Remove card from hand
-        const cardIndex = hand.findIndex((c) => c.rank === weakestCard.rank && c.suit === weakestCard.suit);
-        if (cardIndex !== -1) {
-            hand.splice(cardIndex, 1);
-        }
-        room.hands[playerId] = hand;
-        // Set lastPlay
-        room.lastPlay = {
-            playerId,
-            kind: 'SINGLE',
-            cards: [weakestCard],
-        };
-        // Clear sender from passedSet
-        room.passedSet?.delete(playerId);
-        // Check for round end
-        const roundEnded = hand.length === 0;
-        if (roundEnded) {
-            checkAndHandleRoundEnd(roomId, playerId).catch((err) => {
-                app.log.error(`Error handling round end: ${err}`);
-            });
-            return;
-        }
-        // Move to next active player
-        room.currentTurnPlayerId = getNextActivePlayer(playerId, room.seatedPlayerIds, room.hands);
-        // Broadcast game state
-        broadcastGameState(roomId);
-        broadcastRoomOverview(roomId);
-        // Restart timer for next player
-        startTurnTimer(roomId);
-    }
-}
-/**
- * Start or restart turn timer for current player
- */
-function startTurnTimer(roomId) {
-    const room = getRoom(roomId);
-    if (!room || room.phase !== 'playing' || !room.currentTurnPlayerId) {
-        return;
-    }
-    // Clear existing timer
-    clearTurnTimer(roomId);
-    // Set turn end time
-    room.turnEndsAt = Date.now() + TURN_DURATION_MS;
-    // Start new timer
-    const delay = TURN_DURATION_MS;
-    room.turnTimer = setTimeout(() => {
-        handleTurnTimerTimeout(roomId);
-    }, delay);
-    // Broadcast TURN_TIMER to all clients
-    broadcastTurnTimer(roomId);
-}
-/**
  * Get count of active players (players with cards)
  */
 function getActivePlayerCount(seatedPlayerIds, hands) {
@@ -496,8 +331,6 @@ function checkAndHandleTrickEnd(roomId) {
         broadcastGameState(roomId);
         // Broadcast room overview to all (including queued players)
         broadcastRoomOverview(roomId);
-        // Restart timer for new trick starter
-        startTurnTimer(roomId);
     }
 }
 /**
@@ -998,8 +831,6 @@ function handlePlay(roomId, playerId, cards, ws) {
     broadcastGameState(roomId);
     // Broadcast room overview to all (including queued players)
     broadcastRoomOverview(roomId);
-    // Restart timer for next player
-    startTurnTimer(roomId);
 }
 /**
  * Handle PASS message
@@ -1081,8 +912,6 @@ function handlePass(roomId, playerId, ws) {
     broadcastGameState(roomId);
     // Broadcast room overview to all (including queued players)
     broadcastRoomOverview(roomId);
-    // Restart timer for next player
-    startTurnTimer(roomId);
 }
 wss.on('connection', (ws) => {
     let authenticatedData;
