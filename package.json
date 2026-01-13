@@ -1,0 +1,17 @@
+{
+  "name": "poker-backend",
+  "version": "1.0.0",
+  "description": "Poker game backend monorepo",
+  "private": true,
+  "scripts": {
+    "build": "cd packages/rules && npm install && npm run build && cd ../../apps/server && npm install && npm run build",
+    "build:rules": "cd packages/rules && npm install && npm run build",
+    "build:server": "cd apps/server && npm install && npm run build",
+    "start": "cd apps/server && npm start",
+    "dev": "cd apps/server && npm run dev"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
+}
