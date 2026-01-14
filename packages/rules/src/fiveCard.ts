@@ -30,21 +30,24 @@ export interface FiveCardClassification {
 
 /**
  * Get rank order value for straight comparison
- * Special: 2-3-4-5-6 is lowest, 10-J-Q-K-A is highest
+ * Special: A-2-3-4-5 (wheel) is lowest, 2-3-4-5-6 is next, 10-J-Q-K-A is highest
  * In straights, 2 is NOT treated as highest outside sequences
  */
 function getStraightRankOrder(rank: Rank): number {
-  // Special case: 2 in straight context (only for 2-3-4-5-6)
+  // Special case: 2 in straight context (for 2-3-4-5-6 or A-2-3-4-5)
   if (rank === '2') {
     return 2; // Treat as low for straight purposes
   }
+  // Special case: A in wheel context (A-2-3-4-5) - treat as rank 1 (lowest)
+  // But we'll handle this in isStraight by returning highestRank: '5'
   return RANK_ORDER[rank];
 }
 
 /**
  * Check if 5 cards form a straight
  * Special rules:
- * - Lowest: 2-3-4-5-6
+ * - Lowest: A-2-3-4-5 (wheel)
+ * - Next: 2-3-4-5-6
  * - Highest: 10-J-Q-K-A
  * - 2 is NOT treated as highest outside these sequences
  */
@@ -60,8 +63,23 @@ function isStraight(cards: Card[]): { isStraight: boolean; highestRank?: Rank } 
     return aOrder - bOrder;
   });
 
-  // Check for special low straight: 2-3-4-5-6
   const ranks = sorted.map((c) => c.rank);
+
+  // Check for special lowest straight: A-2-3-4-5 (wheel) - MUST check first
+  // After sorting with getStraightRankOrder, A (14) will be last, so order is: 2, 3, 4, 5, A
+  const rankSet = new Set(ranks);
+  if (
+    rankSet.has('A') &&
+    rankSet.has('2') &&
+    rankSet.has('3') &&
+    rankSet.has('4') &&
+    rankSet.has('5') &&
+    ranks.length === 5
+  ) {
+    return { isStraight: true, highestRank: '5' }; // Return '5' so it's lower than 2-3-4-5-6
+  }
+
+  // Check for special low straight: 2-3-4-5-6
   if (
     ranks[0] === '2' &&
     ranks[1] === '3' &&
@@ -83,9 +101,10 @@ function isStraight(cards: Card[]): { isStraight: boolean; highestRank?: Rank } 
     return { isStraight: true, highestRank: 'A' };
   }
 
-  // Check for regular straights (no 2s except in 2-3-4-5-6)
+  // Check for regular straights (no 2s except in special sequences, no A-2-3-4-5)
   const hasTwo = ranks.includes('2');
-  if (hasTwo) {
+  const hasAce = ranks.includes('A');
+  if (hasTwo || hasAce) {
     return { isStraight: false };
   }
 
