@@ -19,6 +19,7 @@ import {
   type PersonalStateMessage,
   type RoundEndMessage,
   type GameEndMessage,
+  type PlayerLeftMessage,
   type RulesMessage,
   type ScoreUpdateMessage,
   type RoomOverviewMessage,
@@ -1598,15 +1599,32 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', () => {
     authenticatedData = authenticated.get(ws);
     if (authenticatedData) {
+      const room = getRoom(authenticatedData.roomId);
+
       // Mark player as disconnected (don't remove from game state)
       removeClientFromRoom(authenticatedData.roomId, ws, authenticatedData.playerId);
-      
+
+      // Broadcast PLAYER_LEFT to all remaining clients
+      if (room) {
+        const playerLeftMessage: PlayerLeftMessage = {
+          type: 'PLAYER_LEFT',
+          roomId: authenticatedData.roomId,
+          playerId: authenticatedData.playerId,
+        };
+        const playerLeftMsg = JSON.stringify(playerLeftMessage);
+        for (const client of room.clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(playerLeftMsg);
+          }
+        }
+      }
+
       // Broadcast updates to show connection status change
       broadcastRoomState(authenticatedData.roomId);
       broadcastRoomOverview(authenticatedData.roomId);
-      
+
       authenticated.delete(ws);
-      
+
       app.log.info(`Player disconnected: roomId=${authenticatedData.roomId}, playerId=${authenticatedData.playerId}`);
     }
   });

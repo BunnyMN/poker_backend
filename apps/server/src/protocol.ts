@@ -138,6 +138,12 @@ export type GameEndMessage = {
   totalScores: Record<string, number>;
 };
 
+export type PlayerLeftMessage = {
+  type: 'PLAYER_LEFT';
+  roomId: string;
+  playerId: string;
+};
+
 export type RulesMessage = {
   type: 'RULES';
   roomId: string;
@@ -204,6 +210,7 @@ export type ServerMessage =
   | PersonalStateMessage
   | RoundEndMessage
   | GameEndMessage
+  | PlayerLeftMessage
   | RulesMessage
   | ScoreUpdateMessage
   | RoomOverviewMessage
