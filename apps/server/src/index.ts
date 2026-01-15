@@ -1,11 +1,14 @@
 import Fastify from 'fastify';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { env } from './env.js';
 import { verifyAccessToken } from './jwt.js';
 
-// Supabase client for updating room status
-const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+// Supabase client for updating room status (optional)
+let supabase: SupabaseClient | null = null;
+if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) {
+  supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+}
 import {
   ClientMessageSchema,
   type ClientMessage,
@@ -804,20 +807,24 @@ async function checkAndHandleRoundEnd(roomId: string, winnerPlayerId: string): P
       }
     }
 
-    // Update room status to 'finished' in Supabase
-    try {
-      const { error } = await supabase
-        .from('rooms')
-        .update({ status: 'finished' })
-        .eq('id', roomId);
+    // Update room status to 'finished' in Supabase (if client is available)
+    if (supabase) {
+      try {
+        const { error } = await supabase
+          .from('rooms')
+          .update({ status: 'finished' })
+          .eq('id', roomId);
 
-      if (error) {
-        app.log.error(`Failed to update room status to finished: ${error.message}`);
-      } else {
-        app.log.info(`Room ${roomId} status updated to finished`);
+        if (error) {
+          app.log.error(`Failed to update room status to finished: ${error.message}`);
+        } else {
+          app.log.info(`Room ${roomId} status updated to finished`);
+        }
+      } catch (err) {
+        app.log.error(`Error updating room status: ${err}`);
       }
-    } catch (err) {
-      app.log.error(`Error updating room status: ${err}`);
+    } else {
+      app.log.warn(`Supabase client not configured, room status not updated in database`);
     }
 
     // Set phase to prevent further actions
