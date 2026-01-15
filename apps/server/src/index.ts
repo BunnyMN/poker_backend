@@ -20,6 +20,7 @@ import {
   type RoundEndMessage,
   type GameEndMessage,
   type PlayerLeftMessage,
+  type PlayerJoinedMessage,
   type RulesMessage,
   type ScoreUpdateMessage,
   type RoomOverviewMessage,
@@ -1330,10 +1331,28 @@ wss.on('connection', (ws: WebSocket) => {
           // Send SYNC_STATE immediately after WELCOME (includes private hand)
           sendSyncState(message.roomId, playerId, ws);
 
+          // Broadcast PLAYER_JOINED to all other clients (not reconnection)
+          if (!isReconnect) {
+            const room = getRoom(message.roomId);
+            if (room) {
+              const playerJoinedMessage: PlayerJoinedMessage = {
+                type: 'PLAYER_JOINED',
+                roomId: message.roomId,
+                playerId,
+              };
+              const playerJoinedMsg = JSON.stringify(playerJoinedMessage);
+              for (const client of room.clients) {
+                if (client !== ws && client.readyState === WebSocket.OPEN) {
+                  client.send(playerJoinedMsg);
+                }
+              }
+            }
+          }
+
           // Broadcast ROOM_STATE immediately (replaces old STATE format)
           const count = broadcastRoomState(message.roomId);
           app.log.info(`ROOM_STATE broadcast: roomId=${message.roomId}, count=${count}`);
-          
+
           // Broadcast ROOM_OVERVIEW to all clients (including queued players)
           broadcastRoomOverview(message.roomId);
         } catch (error) {
@@ -1382,16 +1401,72 @@ wss.on('connection', (ws: WebSocket) => {
         // Broadcast ROOM_STATE
         const count = broadcastRoomState(message.roomId);
         app.log.info(`ROOM_STATE broadcast: roomId=${message.roomId}, count=${count}`);
-        
+
         // Broadcast ROOM_OVERVIEW to all clients (including queued players)
         broadcastRoomOverview(message.roomId);
 
-        // Check if all players are ready and >=2 players, then broadcast ROUND_START
+        // Note: Game no longer auto-starts when all ready. Owner must send START_GAME.
+        return;
+      }
+
+      // Handle START_GAME (only owner can start)
+      if (message.type === 'START_GAME') {
+        if (!authenticatedData) {
+          const errorMessage: ErrorMessage = {
+            type: 'ERROR',
+            code: 'NOT_AUTHENTICATED',
+            message: 'Must send HELLO first',
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        if (message.roomId !== authenticatedData.roomId) {
+          const errorMessage: ErrorMessage = {
+            type: 'ERROR',
+            code: 'INVALID_ROOM',
+            message: 'Room ID does not match authenticated room',
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        const room = getRoom(message.roomId);
+        if (!room) {
+          const errorMessage: ErrorMessage = {
+            type: 'ERROR',
+            code: 'ROOM_NOT_FOUND',
+            message: 'Room not found',
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        // Only owner can start
+        if (room.ownerPlayerId !== authenticatedData.playerId) {
+          const errorMessage: ActionErrorMessage = {
+            type: 'ACTION_ERROR',
+            code: 'NOT_OWNER',
+            message: 'Only the room owner can start the game',
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        // Check if all players are ready and >=2 players
         const started = checkAndBroadcastRoundStart(message.roomId);
         if (started) {
-          app.log.info(`ROUND_START broadcast: roomId=${message.roomId}`);
+          app.log.info(`ROUND_START broadcast: roomId=${message.roomId} (started by owner)`);
           // Deal cards and send DEALT messages
           await dealAndSendCards(message.roomId);
+        } else {
+          // Not all ready or not enough players
+          const errorMessage: ActionErrorMessage = {
+            type: 'ACTION_ERROR',
+            code: 'CANNOT_START',
+            message: 'Cannot start game. Need at least 2 players and all must be ready.',
+          };
+          ws.send(JSON.stringify(errorMessage));
         }
 
         return;
