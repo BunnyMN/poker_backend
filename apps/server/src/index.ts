@@ -1,7 +1,11 @@
 import Fastify from 'fastify';
 import { WebSocketServer, WebSocket } from 'ws';
+import { createClient } from '@supabase/supabase-js';
 import { env } from './env.js';
 import { verifyAccessToken } from './jwt.js';
+
+// Supabase client for updating room status
+const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 import {
   ClientMessageSchema,
   type ClientMessage,
@@ -11,6 +15,7 @@ import {
   type GameStateMessage,
   type PersonalStateMessage,
   type RoundEndMessage,
+  type GameEndMessage,
   type RulesMessage,
   type ScoreUpdateMessage,
   type RoomOverviewMessage,
@@ -774,6 +779,50 @@ async function checkAndHandleRoundEnd(roomId: string, winnerPlayerId: string): P
     if (client.readyState === WebSocket.OPEN) {
       client.send(scoreUpdateMsg);
     }
+  }
+
+  // 3.5. Check if game should end (only 1 player remaining)
+  const remainingPlayers = getRemainingPlayers(room);
+  if (remainingPlayers.length <= 1) {
+    // Game over! The remaining player (or round winner if all eliminated) wins
+    const gameWinner = remainingPlayers.length === 1 ? remainingPlayers[0] : winnerPlayerId;
+
+    app.log.info(`Game ended: roomId=${roomId}, winner=${gameWinner}, remainingPlayers=${remainingPlayers.length}`);
+
+    // Broadcast GAME_END
+    const gameEndMessage: GameEndMessage = {
+      type: 'GAME_END',
+      roomId,
+      winnerPlayerId: gameWinner,
+      totalScores: totalScoresObj,
+    };
+
+    const gameEndMsg = JSON.stringify(gameEndMessage);
+    for (const client of room.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(gameEndMsg);
+      }
+    }
+
+    // Update room status to 'finished' in Supabase
+    try {
+      const { error } = await supabase
+        .from('rooms')
+        .update({ status: 'finished' })
+        .eq('id', roomId);
+
+      if (error) {
+        app.log.error(`Failed to update room status to finished: ${error.message}`);
+      } else {
+        app.log.info(`Room ${roomId} status updated to finished`);
+      }
+    } catch (err) {
+      app.log.error(`Error updating room status: ${err}`);
+    }
+
+    // Set phase to prevent further actions
+    room.phase = 'lobby'; // Reset to lobby (game over)
+    return; // Don't start next round
   }
 
   // 4. Perform rotation and seat refilling
