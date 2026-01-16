@@ -164,6 +164,21 @@ async function dealAndSendCards(roomId: string): Promise<void> {
   room.lastPlay = null;
   room.passedSet = new Set();
 
+  // Update Supabase room status to 'playing' (if client is available)
+  if (supabase) {
+    supabase
+      .from('rooms')
+      .update({ status: 'playing' })
+      .eq('id', roomId)
+      .then(({ error }) => {
+        if (error) {
+          app.log.error(`Failed to update room status to playing: ${error.message}`);
+        } else {
+          app.log.info(`Room ${roomId} status updated to playing`);
+        }
+      });
+  }
+
   // Send DEALT message to each seated player using their active connection
   for (const playerId of seatedPlayerIds) {
     const playerHand = hands[playerId];
