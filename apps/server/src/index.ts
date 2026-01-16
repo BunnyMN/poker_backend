@@ -1250,11 +1250,16 @@ function handlePlay(
   // Check for round end (before moving turn)
   const roundEnded = room.hands[playerId].length === 0;
   if (roundEnded) {
+    // Broadcast the final play so all clients can see it before round ends
+    sendPersonalState(roomId, playerId, ws);
+    broadcastGameState(roomId);
+    broadcastRoomOverview(roomId);
+
     // Handle round end asynchronously (scoring, elimination, rotation, next round)
+    // The 3-second delay in checkAndHandleRoundEnd allows players to see the winning cards
     checkAndHandleRoundEnd(roomId, playerId).catch((err) => {
       app.log.error(`Error handling round end: ${err}`);
     });
-    // Don't advance turn or broadcast if round ended
     return;
   }
 
