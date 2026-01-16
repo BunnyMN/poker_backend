@@ -930,11 +930,23 @@ async function checkAndHandleRoundEnd(roomId: string, winnerPlayerId: string): P
   // Broadcast room overview after rotation (seating changed)
   broadcastRoomOverview(roomId);
 
-  // 5. Start next round
+  // 5. Wait 3 seconds before starting next round
+  // This allows players to see the last played cards
+  app.log.info(`Waiting 3 seconds before next round: roomId=${roomId}`);
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+
+  // Verify room still exists and is in round_end phase before continuing
+  const roomAfterDelay = getRoom(roomId);
+  if (!roomAfterDelay || roomAfterDelay.phase !== 'round_end') {
+    app.log.warn(`Room state changed during delay, skipping next round: roomId=${roomId}`);
+    return;
+  }
+
+  // 6. Start next round
   // Reset trick state
-  room.lastPlay = null;
-  if (room.passedSet) {
-    room.passedSet.clear();
+  roomAfterDelay.lastPlay = null;
+  if (roomAfterDelay.passedSet) {
+    roomAfterDelay.passedSet.clear();
   }
 
   // Deal new cards and determine starter
