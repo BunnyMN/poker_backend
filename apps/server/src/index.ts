@@ -444,34 +444,46 @@ function getActivePlayerCount(
 /**
  * Check if a play is "unbeatable" (giliin totigo)
  * Unbeatable hands:
+ * - Single: 2 of Spades (Gil-iin 2) - highest single card
  * - Four 2s (2222 + any kicker) - the highest Four of a Kind
  * - Straight Flush 10-J-Q-K-A of Spades (highest possible hand)
  */
 function isUnbeatableHand(lastPlay: { kind: string; fiveKind?: string; cards: Card[] } | null): boolean {
-  if (!lastPlay || lastPlay.kind !== 'FIVE') {
+  if (!lastPlay) {
     return false;
   }
 
-  // Check for Four 2s (giliin totigo)
-  if (lastPlay.fiveKind === 'FOUR') {
-    // Count 2s in the cards
-    const twosCount = lastPlay.cards.filter(c => c.rank === '2').length;
-    if (twosCount === 4) {
-      return true; // Four 2s - unbeatable among Four of a Kind
+  // Check for 2 of Spades (Gil-iin 2) - highest single card
+  if (lastPlay.kind === 'SINGLE' && lastPlay.cards.length === 1) {
+    const card = lastPlay.cards[0];
+    if (card.rank === '2' && card.suit === 'S') {
+      return true; // 2 of Spades - unbeatable single card
     }
   }
 
-  // Check for highest Straight Flush (10-J-Q-K-A of Spades)
-  if (lastPlay.fiveKind === 'STRAIGHT_FLUSH') {
-    const ranks = lastPlay.cards.map(c => c.rank);
-    const suits = lastPlay.cards.map(c => c.suit);
+  // For 5-card hands
+  if (lastPlay.kind === 'FIVE') {
+    // Check for Four 2s (giliin totigo)
+    if (lastPlay.fiveKind === 'FOUR') {
+      // Count 2s in the cards
+      const twosCount = lastPlay.cards.filter(c => c.rank === '2').length;
+      if (twosCount === 4) {
+        return true; // Four 2s - unbeatable among Four of a Kind
+      }
+    }
 
-    // Check if all Spades and contains 10-J-Q-K-A
-    const isAllSpades = suits.every(s => s === 'S');
-    const hasRoyalRanks = ['10', 'J', 'Q', 'K', 'A'].every(r => ranks.includes(r as Card['rank']));
+    // Check for highest Straight Flush (10-J-Q-K-A of Spades)
+    if (lastPlay.fiveKind === 'STRAIGHT_FLUSH') {
+      const ranks = lastPlay.cards.map(c => c.rank);
+      const suits = lastPlay.cards.map(c => c.suit);
 
-    if (isAllSpades && hasRoyalRanks) {
-      return true; // Royal Straight Flush of Spades - highest possible hand
+      // Check if all Spades and contains 10-J-Q-K-A
+      const isAllSpades = suits.every(s => s === 'S');
+      const hasRoyalRanks = ['10', 'J', 'Q', 'K', 'A'].every(r => ranks.includes(r as Card['rank']));
+
+      if (isAllSpades && hasRoyalRanks) {
+        return true; // Royal Straight Flush of Spades - highest possible hand
+      }
     }
   }
 
