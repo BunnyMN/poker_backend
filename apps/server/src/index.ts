@@ -1559,29 +1559,69 @@ wss.on('connection', (ws: WebSocket) => {
           return;
         }
 
-        // Only owner can start
+        // Log debug info
+        app.log.info(`START_GAME request: roomId=${message.roomId}, playerId=${authenticatedData.playerId}, ownerPlayerId=${room.ownerPlayerId}, phase=${room.phase}, playerCount=${room.players.size}`);
+
+        // Only owner can start (owner is the first player to connect)
         if (room.ownerPlayerId !== authenticatedData.playerId) {
           const errorMessage: ActionErrorMessage = {
             type: 'ACTION_ERROR',
             code: 'NOT_OWNER',
-            message: 'Only the room owner can start the game',
+            message: `Only the room owner can start the game. Owner: ${room.ownerPlayerId?.substring(0, 8)}...`,
           };
           ws.send(JSON.stringify(errorMessage));
           return;
         }
 
-        // Check if all players are ready and >=2 players
+        // Check phase
+        if (room.phase !== 'lobby') {
+          const errorMessage: ActionErrorMessage = {
+            type: 'ACTION_ERROR',
+            code: 'INVALID_PHASE',
+            message: `Cannot start game in phase: ${room.phase}`,
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        // Check player count
+        if (room.players.size < 2) {
+          const errorMessage: ActionErrorMessage = {
+            type: 'ACTION_ERROR',
+            code: 'NOT_ENOUGH_PLAYERS',
+            message: `Need at least 2 players. Current: ${room.players.size}`,
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        // Check if all players are ready
+        const notReadyPlayers = Array.from(room.players.entries())
+          .filter(([, data]) => !data.isReady)
+          .map(([id]) => id.substring(0, 8));
+
+        if (notReadyPlayers.length > 0) {
+          const errorMessage: ActionErrorMessage = {
+            type: 'ACTION_ERROR',
+            code: 'PLAYERS_NOT_READY',
+            message: `Not all players are ready. Waiting for: ${notReadyPlayers.join(', ')}...`,
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        // All conditions met - start the game
         const started = checkAndBroadcastRoundStart(message.roomId);
         if (started) {
           app.log.info(`ROUND_START broadcast: roomId=${message.roomId} (started by owner)`);
           // Deal cards and send DEALT messages
           await dealAndSendCards(message.roomId);
         } else {
-          // Not all ready or not enough players
+          // Unexpected error
           const errorMessage: ActionErrorMessage = {
             type: 'ACTION_ERROR',
-            code: 'CANNOT_START',
-            message: 'Cannot start game. Need at least 2 players and all must be ready.',
+            code: 'START_FAILED',
+            message: 'Failed to start game. Please try again.',
           };
           ws.send(JSON.stringify(errorMessage));
         }
