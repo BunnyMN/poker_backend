@@ -442,6 +442,79 @@ function getActivePlayerCount(
 }
 
 /**
+ * Check if a play is "unbeatable" (giliin totigo)
+ * Unbeatable hands:
+ * - Four 2s (2222 + any kicker) - the highest Four of a Kind
+ * - Straight Flush 10-J-Q-K-A of Spades (highest possible hand)
+ */
+function isUnbeatableHand(lastPlay: { kind: string; fiveKind?: string; cards: Card[] } | null): boolean {
+  if (!lastPlay || lastPlay.kind !== 'FIVE') {
+    return false;
+  }
+
+  // Check for Four 2s (giliin totigo)
+  if (lastPlay.fiveKind === 'FOUR') {
+    // Count 2s in the cards
+    const twosCount = lastPlay.cards.filter(c => c.rank === '2').length;
+    if (twosCount === 4) {
+      return true; // Four 2s - unbeatable among Four of a Kind
+    }
+  }
+
+  // Check for highest Straight Flush (10-J-Q-K-A of Spades)
+  if (lastPlay.fiveKind === 'STRAIGHT_FLUSH') {
+    const ranks = lastPlay.cards.map(c => c.rank);
+    const suits = lastPlay.cards.map(c => c.suit);
+
+    // Check if all Spades and contains 10-J-Q-K-A
+    const isAllSpades = suits.every(s => s === 'S');
+    const hasRoyalRanks = ['10', 'J', 'Q', 'K', 'A'].every(r => ranks.includes(r as Card['rank']));
+
+    if (isAllSpades && hasRoyalRanks) {
+      return true; // Royal Straight Flush of Spades - highest possible hand
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Auto-pass all other players when an unbeatable hand is played
+ */
+function autoPassForUnbeatableHand(roomId: string): void {
+  const room = getRoom(roomId);
+  if (!room || room.phase !== 'playing' || !room.lastPlay || !room.seatedPlayerIds || !room.hands || !room.passedSet) {
+    return;
+  }
+
+  // Check if the last play is unbeatable
+  if (!isUnbeatableHand(room.lastPlay)) {
+    return;
+  }
+
+  const lastPlayPlayerId = room.lastPlay.playerId;
+  app.log.info(`Unbeatable hand (giliin totigo) detected: roomId=${roomId}, player=${lastPlayPlayerId}, kind=${room.lastPlay.fiveKind}`);
+
+  // Auto-pass all other active players
+  for (const playerId of room.seatedPlayerIds) {
+    if (playerId === lastPlayPlayerId) {
+      continue; // Skip the player who played
+    }
+    const hand = room.hands[playerId];
+    if (hand && hand.length > 0) {
+      // Player has cards - auto-pass them
+      room.passedSet.add(playerId);
+    }
+  }
+
+  // Broadcast game state with updated passes
+  broadcastGameState(roomId);
+
+  // Check if trick should end (it should, since all others just passed)
+  checkAndHandleTrickEnd(roomId);
+}
+
+/**
  * Check if trick should end and handle it
  */
 function checkAndHandleTrickEnd(roomId: string): void {
@@ -1146,6 +1219,26 @@ function handlePlay(
     return;
   }
 
+  // Check for unbeatable hand (giliin totigo) and auto-pass all other players
+  // This must be called BEFORE moving to next player
+  autoPassForUnbeatableHand(roomId);
+
+  // Re-check if room is still in playing phase (autoPassForUnbeatableHand may have ended the trick)
+  const roomAfterAutoPass = getRoom(roomId);
+  if (!roomAfterAutoPass || roomAfterAutoPass.phase !== 'playing') {
+    // Trick ended due to auto-pass, state already broadcast
+    sendPersonalState(roomId, playerId, ws);
+    return;
+  }
+
+  // If trick ended due to auto-pass, lastPlay will be null - don't change current turn
+  if (!roomAfterAutoPass.lastPlay) {
+    // Trick ended, player who played the unbeatable hand starts new trick
+    // broadcastGameState and broadcastRoomOverview already called in autoPassForUnbeatableHand -> checkAndHandleTrickEnd
+    sendPersonalState(roomId, playerId, ws);
+    return;
+  }
+
   // Move to next active player (skip players with no cards)
   room.currentTurnPlayerId = getNextActivePlayer(
     playerId,
@@ -1158,7 +1251,7 @@ function handlePlay(
 
   // Broadcast game state to all seated players
   broadcastGameState(roomId);
-  
+
   // Broadcast room overview to all (including queued players)
   broadcastRoomOverview(roomId);
 }
