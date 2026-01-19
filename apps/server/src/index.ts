@@ -35,6 +35,12 @@ import {
   getRoom,
   removeClientFromRoom,
   setPlayerReady,
+  setTurnTimer,
+  clearTurnTimer,
+  getTurnTimeRemaining,
+  setIdleTimer,
+  clearIdleTimer,
+  TURN_TIMEOUT_MS,
 } from './rooms.js';
 import {
   createDeck,
@@ -214,9 +220,12 @@ async function dealAndSendCards(roomId: string): Promise<void> {
 
   // Broadcast initial GAME_STATE after dealing (for seated players)
   broadcastGameState(roomId);
-  
+
   // Broadcast ROOM_OVERVIEW to all clients (including queued players)
   broadcastRoomOverview(roomId);
+
+  // Start turn timer for the first player
+  startTurnTimer(roomId);
 }
 
 /**
@@ -276,6 +285,9 @@ function broadcastGameState(roomId: string): void {
   // Get passed player IDs as array
   const passedPlayerIds = Array.from(room.passedSet || []);
 
+  // Get turn time remaining
+  const turnTimeRemaining = getTurnTimeRemaining(roomId);
+
   const gameStateMessage: GameStateMessage = {
     type: 'GAME_STATE',
     roomId,
@@ -284,6 +296,7 @@ function broadcastGameState(roomId: string): void {
     lastPlay: room.lastPlay,
     handsCount,
     passedPlayerIds,
+    turnTimeRemaining: turnTimeRemaining ?? undefined,
   };
 
   const message = JSON.stringify(gameStateMessage);
@@ -291,6 +304,178 @@ function broadcastGameState(roomId: string): void {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
+  }
+}
+
+/**
+ * Start turn timer for current player. Auto-passes when timer expires.
+ */
+function startTurnTimer(roomId: string): void {
+  const room = getRoom(roomId);
+  if (!room || room.phase !== 'playing' || !room.currentTurnPlayerId) {
+    return;
+  }
+
+  const currentPlayerId = room.currentTurnPlayerId;
+  console.log(`[TurnTimer] Starting ${TURN_TIMEOUT_MS / 1000}s timer for player ${currentPlayerId} in room ${roomId}`);
+
+  setTurnTimer(roomId, () => {
+    // Timer expired - auto-pass for the player
+    console.log(`[TurnTimer] Timer expired for player ${currentPlayerId} in room ${roomId} - auto-passing`);
+    handleAutoPass(roomId, currentPlayerId);
+  });
+}
+
+/**
+ * Handle automatic pass when turn timer expires
+ */
+async function handleAutoPass(roomId: string, playerId: string): Promise<void> {
+  const room = getRoom(roomId);
+  if (!room || room.phase !== 'playing') {
+    console.log(`[AutoPass] Room ${roomId} not in playing phase, skipping auto-pass`);
+    return;
+  }
+
+  // Verify it's still this player's turn (might have changed due to race condition)
+  if (room.currentTurnPlayerId !== playerId) {
+    console.log(`[AutoPass] Turn already changed from ${playerId}, skipping auto-pass`);
+    return;
+  }
+
+  // Check if player can pass (not the starter of the trick)
+  if (!room.lastPlay) {
+    // Player is starter and must play - they lose their turn, skip to next player
+    console.log(`[AutoPass] Player ${playerId} is starter but timed out, forcing skip to next player`);
+
+    if (!room.seatedPlayerIds || !room.hands) {
+      return;
+    }
+
+    // Move to next player (they become the new starter)
+    room.currentTurnPlayerId = getNextActivePlayer(
+      playerId,
+      room.seatedPlayerIds,
+      room.hands
+    );
+    room.passedSet?.clear(); // Clear passes for new trick
+
+    broadcastGameState(roomId);
+    broadcastRoomOverview(roomId);
+    startTurnTimer(roomId); // Start timer for next player
+    return;
+  }
+
+  // Normal auto-pass
+  room.passedSet = room.passedSet || new Set();
+  room.passedSet.add(playerId);
+
+  // Check if trick ended (all other active players passed)
+  checkAndHandleTrickEnd(roomId);
+
+  // Re-fetch room state after checkAndHandleTrickEnd might have modified it
+  const roomAfter = getRoom(roomId);
+  if (!roomAfter) return;
+
+  // If trick didn't end (lastPlay still exists), move to next player
+  if (roomAfter.lastPlay && roomAfter.phase === 'playing') {
+    if (roomAfter.seatedPlayerIds && roomAfter.hands) {
+      roomAfter.currentTurnPlayerId = getNextActivePlayer(
+        playerId,
+        roomAfter.seatedPlayerIds,
+        roomAfter.hands
+      );
+    }
+  }
+
+  broadcastGameState(roomId);
+  broadcastRoomOverview(roomId);
+
+  // Start timer for next player (if game is still going)
+  if (roomAfter.phase === 'playing' && roomAfter.currentTurnPlayerId) {
+    startTurnTimer(roomId);
+  }
+}
+
+/**
+ * Handle player idle timeout (disconnected for too long)
+ * Player is removed from the game if they don't reconnect within the timeout period
+ */
+function handlePlayerIdleTimeout(roomId: string, playerId: string): void {
+  const room = getRoom(roomId);
+  if (!room) {
+    return;
+  }
+
+  // Check if player reconnected (no longer disconnected)
+  const player = room.players.get(playerId);
+  if (player && !player.disconnectedAt) {
+    console.log(`[IdleTimeout] Player ${playerId} already reconnected, skipping removal`);
+    return;
+  }
+
+  console.log(`[IdleTimeout] Removing idle player ${playerId} from room ${roomId}`);
+
+  // If game is in progress and it's this player's turn, auto-pass first
+  if (room.phase === 'playing' && room.currentTurnPlayerId === playerId) {
+    handleAutoPass(roomId, playerId);
+  }
+
+  // Remove player from the game
+  room.players.delete(playerId);
+  room.connectionsByPlayerId.delete(playerId);
+
+  // If player was in queue, remove them
+  const queueIndex = room.queuePlayerIds.indexOf(playerId);
+  if (queueIndex !== -1) {
+    room.queuePlayerIds.splice(queueIndex, 1);
+  }
+
+  // If player was seated, handle their removal from the game
+  if (room.seatedPlayerIds && room.seatedPlayerIds.includes(playerId)) {
+    room.seatedPlayerIds = room.seatedPlayerIds.filter(id => id !== playerId);
+
+    // If player had cards, discard them
+    if (room.hands && room.hands[playerId]) {
+      delete room.hands[playerId];
+    }
+
+    // Remove from passed set if present
+    room.passedSet?.delete(playerId);
+
+    // Check if game should end (not enough players)
+    const remainingSeated = room.seatedPlayerIds.length;
+    if (remainingSeated < 2 && room.phase === 'playing') {
+      // Game ends - remaining player wins by default
+      if (remainingSeated === 1) {
+        const winnerPlayerId = room.seatedPlayerIds[0];
+        console.log(`[IdleTimeout] Only one player remaining, ${winnerPlayerId} wins by default`);
+
+        clearTurnTimer(roomId);
+        room.phase = 'round_end';
+
+        // Broadcast GAME_END
+        const gameEndMessage: GameEndMessage = {
+          type: 'GAME_END',
+          roomId,
+          winnerPlayerId,
+          totalScores: Object.fromEntries(room.totalScores),
+        };
+
+        const gameEndMsg = JSON.stringify(gameEndMessage);
+        for (const client of room.clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(gameEndMsg);
+          }
+        }
+      }
+    }
+  }
+
+  // Broadcast updates
+  broadcastRoomState(roomId);
+  broadcastRoomOverview(roomId);
+  if (room.phase === 'playing') {
+    broadcastGameState(roomId);
   }
 }
 
@@ -835,6 +1020,9 @@ async function checkAndHandleRoundEnd(roomId: string, winnerPlayerId: string): P
   // Player has no cards left - they win!
   app.log.info(`Round ended: roomId=${roomId}, winner=${winnerPlayerId}`);
 
+  // Clear turn timer since round is ending
+  clearTurnTimer(roomId);
+
   room.phase = 'round_end';
 
   // Store previous round data for next round starter determination
@@ -1298,6 +1486,9 @@ function handlePlay(
 
   // Broadcast room overview to all (including queued players)
   broadcastRoomOverview(roomId);
+
+  // Start turn timer for next player
+  startTurnTimer(roomId);
 }
 
 /**
@@ -1397,9 +1588,14 @@ function handlePass(roomId: string, playerId: string, ws: WebSocket): void {
 
   // Broadcast game state to all seated players
   broadcastGameState(roomId);
-  
+
   // Broadcast room overview to all (including queued players)
   broadcastRoomOverview(roomId);
+
+  // Start turn timer for next player (if game is still going)
+  if (room.phase === 'playing' && room.currentTurnPlayerId) {
+    startTurnTimer(roomId);
+  }
 }
 
 wss.on('connection', (ws: WebSocket) => {
@@ -1452,9 +1648,11 @@ wss.on('connection', (ws: WebSocket) => {
 
           // Add to room (handles reconnection - replaces old ws if exists)
           const { isReconnect } = addClientToRoom(message.roomId, ws, playerId);
-          
+
           if (isReconnect) {
             app.log.info(`Reconnection: roomId=${message.roomId}, playerId=${playerId}`);
+            // Clear idle timer since player reconnected
+            clearIdleTimer(message.roomId, playerId);
           }
 
           // Send WELCOME
@@ -1851,17 +2049,18 @@ wss.on('connection', (ws: WebSocket) => {
   ws.on('close', () => {
     authenticatedData = authenticated.get(ws);
     if (authenticatedData) {
-      const room = getRoom(authenticatedData.roomId);
+      const { roomId, playerId } = authenticatedData;
+      const room = getRoom(roomId);
 
       // Mark player as disconnected (don't remove from game state)
-      removeClientFromRoom(authenticatedData.roomId, ws, authenticatedData.playerId);
+      removeClientFromRoom(roomId, ws, playerId);
 
       // Broadcast PLAYER_LEFT to all remaining clients
       if (room) {
         const playerLeftMessage: PlayerLeftMessage = {
           type: 'PLAYER_LEFT',
-          roomId: authenticatedData.roomId,
-          playerId: authenticatedData.playerId,
+          roomId,
+          playerId,
         };
         const playerLeftMsg = JSON.stringify(playerLeftMessage);
         for (const client of room.clients) {
@@ -1869,15 +2068,22 @@ wss.on('connection', (ws: WebSocket) => {
             client.send(playerLeftMsg);
           }
         }
+
+        // Set idle timer - player has 1 minute to reconnect
+        app.log.info(`[IdleTimer] Starting 60s idle timer for player ${playerId} in room ${roomId}`);
+        setIdleTimer(roomId, playerId, () => {
+          app.log.info(`[IdleTimer] Idle timer expired for player ${playerId} in room ${roomId} - removing from game`);
+          handlePlayerIdleTimeout(roomId, playerId);
+        });
       }
 
       // Broadcast updates to show connection status change
-      broadcastRoomState(authenticatedData.roomId);
-      broadcastRoomOverview(authenticatedData.roomId);
+      broadcastRoomState(roomId);
+      broadcastRoomOverview(roomId);
 
       authenticated.delete(ws);
 
-      app.log.info(`Player disconnected: roomId=${authenticatedData.roomId}, playerId=${authenticatedData.playerId}`);
+      app.log.info(`Player disconnected: roomId=${roomId}, playerId=${playerId}`);
     }
   });
 });

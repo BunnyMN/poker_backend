@@ -123,6 +123,7 @@ export type GameStateMessage = {
   lastPlay: LastPlay | null;
   handsCount: Record<string, number>;
   passedPlayerIds: string[];
+  turnTimeRemaining?: number; // Milliseconds remaining for current turn
 };
 
 export type PersonalStateMessage = {
@@ -198,6 +199,7 @@ export type SyncStateMessage = {
   yourHand: Card[] | null; // Only included for the requesting player
   starterPlayerId?: string;
   starterReason?: 'WINNER' | 'WEAKEST_SINGLE';
+  turnTimeRemaining?: number; // Milliseconds remaining for current turn
 };
 
 export type ActionErrorMessage = {

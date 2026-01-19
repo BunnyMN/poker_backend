@@ -1,6 +1,10 @@
 import { WebSocket } from 'ws';
 import type { RoomStateMessage, RoundStartMessage, Card, LastPlay } from './protocol.js';
 
+// Constants for timeouts
+export const IDLE_TIMEOUT_MS = 60 * 1000; // 1 minute to reconnect
+export const TURN_TIMEOUT_MS = 20 * 1000; // 20 seconds per turn
+
 export interface Room {
   clients: Set<WebSocket>;
   players: Map<string, { isReady: boolean; disconnectedAt?: number }>; // disconnectedAt timestamp if disconnected
@@ -27,6 +31,10 @@ export interface Room {
   currentTurnPlayerId?: string;
   lastPlay?: LastPlay | null;
   passedSet?: Set<string>;
+  // Timer state
+  turnTimer?: NodeJS.Timeout; // Active turn timer
+  turnStartedAt?: number; // When the current turn started (for client display)
+  idleTimers: Map<string, NodeJS.Timeout>; // Idle timeout per disconnected player
 }
 
 const rooms = new Map<string, Room>();
@@ -44,6 +52,7 @@ export function getOrCreateRoom(roomId: string): Room {
       totalScores: new Map(),
       eliminated: new Set(),
       queuePlayerIds: [],
+      idleTimers: new Map(),
     };
     rooms.set(roomId, room);
   }
@@ -223,5 +232,89 @@ export function getSeatedPlayerIds(roomId: string, maxPlayers: number = 4): stri
   }
   // For MVP: all connected players are seated (up to max)
   return Array.from(room.players.keys()).slice(0, maxPlayers);
+}
+
+// ==================== TURN TIMER FUNCTIONS ====================
+
+export function clearTurnTimer(roomId: string): void {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  if (room.turnTimer) {
+    clearTimeout(room.turnTimer);
+    room.turnTimer = undefined;
+  }
+  room.turnStartedAt = undefined;
+}
+
+export function setTurnTimer(
+  roomId: string,
+  onTimeout: () => void
+): void {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  // Clear existing timer first
+  clearTurnTimer(roomId);
+
+  // Set new timer
+  room.turnStartedAt = Date.now();
+  room.turnTimer = setTimeout(() => {
+    room.turnTimer = undefined;
+    room.turnStartedAt = undefined;
+    onTimeout();
+  }, TURN_TIMEOUT_MS);
+}
+
+export function getTurnTimeRemaining(roomId: string): number | null {
+  const room = rooms.get(roomId);
+  if (!room || !room.turnStartedAt) return null;
+
+  const elapsed = Date.now() - room.turnStartedAt;
+  const remaining = TURN_TIMEOUT_MS - elapsed;
+  return remaining > 0 ? remaining : 0;
+}
+
+// ==================== IDLE TIMEOUT FUNCTIONS ====================
+
+export function setIdleTimer(
+  roomId: string,
+  playerId: string,
+  onTimeout: () => void
+): void {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  // Clear existing idle timer for this player if any
+  clearIdleTimer(roomId, playerId);
+
+  // Set new idle timer
+  const timer = setTimeout(() => {
+    room.idleTimers.delete(playerId);
+    onTimeout();
+  }, IDLE_TIMEOUT_MS);
+
+  room.idleTimers.set(playerId, timer);
+}
+
+export function clearIdleTimer(roomId: string, playerId: string): void {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const timer = room.idleTimers.get(playerId);
+  if (timer) {
+    clearTimeout(timer);
+    room.idleTimers.delete(playerId);
+  }
+}
+
+export function clearAllIdleTimers(roomId: string): void {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  for (const timer of room.idleTimers.values()) {
+    clearTimeout(timer);
+  }
+  room.idleTimers.clear();
 }
 
