@@ -29,6 +29,7 @@ import {
   type RoomOverviewMessage,
   type SyncStateMessage,
   type ActionErrorMessage,
+  type SeatInfo,
   type Card,
 } from './protocol.js';
 import {
@@ -37,12 +38,14 @@ import {
   checkAndBroadcastRoundStart,
   getRoom,
   removeClientFromRoom,
+  removePlayerPermanently,
   setPlayerReady,
   setTurnTimer,
   clearTurnTimer,
-  getTurnTimeRemaining,
   setIdleTimer,
   clearIdleTimer,
+  getNextActivePlayerForTurn,
+  seatPlayers,
   TURN_TIMEOUT_MS,
 } from './rooms.js';
 import {
@@ -165,7 +168,8 @@ async function dealAndSendCards(roomId: string): Promise<void> {
 
   // Store game state in room
   room.phase = 'playing';
-  room.seatedPlayerIds = seatedPlayerIds;
+  // Populate seats array with players (this also sets seatedPlayerIds for backwards compatibility)
+  seatPlayers(roomId, seatedPlayerIds);
   room.hands = hands;
   room.starterPlayerId = starter.starterPlayerId;
   room.starterReason = starter.reason;
@@ -261,19 +265,18 @@ function getNextActivePlayer(
 }
 
 /**
- * Get disconnected player IDs (players who have disconnectedAt set)
+ * Convert room seats to SeatInfo array for protocol
  */
-function getDisconnectedPlayerIds(roomId: string): string[] {
+function getSeatsInfo(roomId: string): SeatInfo[] {
   const room = getRoom(roomId);
   if (!room) return [];
 
-  const disconnected: string[] = [];
-  for (const [playerId, data] of room.players.entries()) {
-    if (data.disconnectedAt) {
-      disconnected.push(playerId);
-    }
-  }
-  return disconnected;
+  return room.seats.map(seat => ({
+    seatIndex: seat.seatIndex,
+    playerId: seat.playerId,
+    status: seat.status,
+    offlineSince: seat.offlineSince,
+  }));
 }
 
 /**
@@ -286,17 +289,22 @@ function broadcastGameState(roomId: string): void {
   }
 
   if (
-    !room.seatedPlayerIds ||
     !room.hands ||
     !room.currentTurnPlayerId ||
-    room.lastPlay === undefined
+    room.lastPlay === undefined ||
+    !room.turnId ||
+    !room.turnDeadlineAt
   ) {
     return;
   }
 
   // Calculate hands count (don't leak full hands)
   const handsCount: Record<string, number> = {};
-  for (const playerId of room.seatedPlayerIds) {
+  const seatedPlayerIds = room.seats
+    .filter(s => s.playerId && s.status !== 'REMOVED')
+    .map(s => s.playerId!);
+
+  for (const playerId of seatedPlayerIds) {
     const hand = room.hands[playerId];
     handsCount[playerId] = hand ? hand.length : 0;
   }
@@ -304,22 +312,16 @@ function broadcastGameState(roomId: string): void {
   // Get passed player IDs as array
   const passedPlayerIds = Array.from(room.passedSet || []);
 
-  // Get turn time remaining
-  const turnTimeRemaining = getTurnTimeRemaining(roomId);
-
-  // Get disconnected player IDs
-  const disconnectedPlayerIds = getDisconnectedPlayerIds(roomId);
-
   const gameStateMessage: GameStateMessage = {
     type: 'GAME_STATE',
     roomId,
-    seatedPlayerIds: room.seatedPlayerIds,
+    seats: getSeatsInfo(roomId),
     currentTurnPlayerId: room.currentTurnPlayerId,
     lastPlay: room.lastPlay,
     handsCount,
     passedPlayerIds,
-    turnTimeRemaining: turnTimeRemaining ?? undefined,
-    disconnectedPlayerIds: disconnectedPlayerIds.length > 0 ? disconnectedPlayerIds : undefined,
+    turnId: room.turnId,
+    turnDeadlineAt: room.turnDeadlineAt,
   };
 
   const message = JSON.stringify(gameStateMessage);
@@ -332,59 +334,75 @@ function broadcastGameState(roomId: string): void {
 
 /**
  * Start turn timer for current player. Auto-passes when timer expires.
+ * Returns the turnId for the new turn.
  */
-function startTurnTimer(roomId: string): void {
+function startTurnTimer(roomId: string): string {
   const room = getRoom(roomId);
   if (!room || room.phase !== 'playing' || !room.currentTurnPlayerId) {
-    return;
+    return '';
   }
 
   const currentPlayerId = room.currentTurnPlayerId;
   console.log(`[TurnTimer] Starting ${TURN_TIMEOUT_MS / 1000}s timer for player ${currentPlayerId} in room ${roomId}`);
 
-  setTurnTimer(roomId, () => {
-    // Timer expired - auto-pass for the player
-    console.log(`[TurnTimer] Timer expired for player ${currentPlayerId} in room ${roomId} - auto-passing`);
-    handleAutoPass(roomId, currentPlayerId);
+  const turnId = setTurnTimer(roomId, (expiredTurnId: string) => {
+    // Timer expired - verify turnId matches to prevent race conditions
+    const currentRoom = getRoom(roomId);
+    if (!currentRoom || currentRoom.turnId !== expiredTurnId) {
+      console.log(`[TurnTimer] Turn ${expiredTurnId} already changed, ignoring timeout`);
+      return;
+    }
+    console.log(`[TurnTimer] Timer expired for turn ${expiredTurnId}, player ${currentPlayerId} in room ${roomId} - auto-passing`);
+    handleAutoPass(roomId, currentPlayerId, expiredTurnId);
   });
+
+  return turnId;
 }
 
 /**
  * Handle automatic pass when turn timer expires
  */
-async function handleAutoPass(roomId: string, playerId: string): Promise<void> {
+async function handleAutoPass(roomId: string, playerId: string, turnId?: string): Promise<void> {
   const room = getRoom(roomId);
   if (!room || room.phase !== 'playing') {
     console.log(`[AutoPass] Room ${roomId} not in playing phase, skipping auto-pass`);
     return;
   }
 
-  // Verify it's still this player's turn (might have changed due to race condition)
+  // Verify turnId matches to prevent race conditions
+  if (turnId && room.turnId !== turnId) {
+    console.log(`[AutoPass] Turn ${turnId} doesn't match current turn ${room.turnId}, skipping auto-pass`);
+    return;
+  }
+
+  // Verify it's still this player's turn
   if (room.currentTurnPlayerId !== playerId) {
     console.log(`[AutoPass] Turn already changed from ${playerId}, skipping auto-pass`);
     return;
   }
+
+  // Get seated player IDs from seats
+  const seatedPlayerIds = room.seats
+    .filter(s => s.playerId && s.status !== 'REMOVED')
+    .map(s => s.playerId!);
 
   // Check if player can pass (not the starter of the trick)
   if (!room.lastPlay) {
     // Player is starter and must play - they lose their turn, skip to next player
     console.log(`[AutoPass] Player ${playerId} is starter but timed out, forcing skip to next player`);
 
-    if (!room.seatedPlayerIds || !room.hands) {
+    if (!room.hands) {
       return;
     }
 
-    // Move to next player (they become the new starter)
-    room.currentTurnPlayerId = getNextActivePlayer(
-      playerId,
-      room.seatedPlayerIds,
-      room.hands
-    );
+    // Move to next ACTIVE player (they become the new starter)
+    room.currentTurnPlayerId = getNextActivePlayerForTurn(playerId, roomId) ||
+      getNextActivePlayer(playerId, seatedPlayerIds, room.hands);
     room.passedSet?.clear(); // Clear passes for new trick
 
+    startTurnTimer(roomId); // Start timer for next player
     broadcastGameState(roomId);
     broadcastRoomOverview(roomId);
-    startTurnTimer(roomId); // Start timer for next player
     return;
   }
 
@@ -401,22 +419,19 @@ async function handleAutoPass(roomId: string, playerId: string): Promise<void> {
 
   // If trick didn't end (lastPlay still exists), move to next player
   if (roomAfter.lastPlay && roomAfter.phase === 'playing') {
-    if (roomAfter.seatedPlayerIds && roomAfter.hands) {
-      roomAfter.currentTurnPlayerId = getNextActivePlayer(
-        playerId,
-        roomAfter.seatedPlayerIds,
-        roomAfter.hands
-      );
+    if (roomAfter.hands) {
+      roomAfter.currentTurnPlayerId = getNextActivePlayerForTurn(playerId, roomId) ||
+        getNextActivePlayer(playerId, seatedPlayerIds, roomAfter.hands);
     }
   }
-
-  broadcastGameState(roomId);
-  broadcastRoomOverview(roomId);
 
   // Start timer for next player (if game is still going)
   if (roomAfter.phase === 'playing' && roomAfter.currentTurnPlayerId) {
     startTurnTimer(roomId);
   }
+
+  broadcastGameState(roomId);
+  broadcastRoomOverview(roomId);
 }
 
 /**
@@ -429,48 +444,52 @@ function handlePlayerIdleTimeout(roomId: string, playerId: string): void {
     return;
   }
 
-  // Check if player reconnected (no longer disconnected)
+  // Check if player reconnected (no longer OFFLINE)
   const player = room.players.get(playerId);
-  if (player && !player.disconnectedAt) {
+  if (player && player.status === 'ACTIVE') {
     console.log(`[IdleTimeout] Player ${playerId} already reconnected, skipping removal`);
     return;
   }
 
   console.log(`[IdleTimeout] Removing idle player ${playerId} from room ${roomId}`);
 
-  // If game is in progress and it's this player's turn, auto-pass first
+  // If game is in progress and it's this player's turn, advance turn first
   if (room.phase === 'playing' && room.currentTurnPlayerId === playerId) {
-    handleAutoPass(roomId, playerId);
+    clearTurnTimer(roomId);
+    const nextPlayer = getNextActivePlayerForTurn(playerId, roomId);
+    if (nextPlayer) {
+      room.currentTurnPlayerId = nextPlayer;
+      // If no lastPlay, clear passes for new trick
+      if (!room.lastPlay) {
+        room.passedSet?.clear();
+      }
+      startTurnTimer(roomId);
+    }
   }
 
-  // Remove player from the game
-  room.players.delete(playerId);
-  room.connectionsByPlayerId.delete(playerId);
+  // Check if player was seated (before removing)
+  const wasSeated = room.seats.some(s => s.playerId === playerId);
 
-  // If player was in queue, remove them
+  // Use removePlayerPermanently to properly update seats and seatedPlayerIds
+  removePlayerPermanently(roomId, playerId);
+
+  // Also remove from queue if present
   const queueIndex = room.queuePlayerIds.indexOf(playerId);
   if (queueIndex !== -1) {
     room.queuePlayerIds.splice(queueIndex, 1);
   }
 
-  // If player was seated, handle their removal from the game
-  if (room.seatedPlayerIds && room.seatedPlayerIds.includes(playerId)) {
-    room.seatedPlayerIds = room.seatedPlayerIds.filter(id => id !== playerId);
+  // Remove connection tracking
+  room.connectionsByPlayerId.delete(playerId);
 
-    // If player had cards, discard them
-    if (room.hands && room.hands[playerId]) {
-      delete room.hands[playerId];
-    }
-
-    // Remove from passed set if present
-    room.passedSet?.delete(playerId);
-
-    // Check if game should end (not enough players)
-    const remainingSeated = room.seatedPlayerIds.length;
-    if (remainingSeated < 2 && room.phase === 'playing') {
+  // If player was seated, check if game should end
+  if (wasSeated) {
+    // Get remaining active seated players
+    const remainingSeated = room.seats.filter(s => s.playerId && s.status !== 'REMOVED' && s.status !== 'EMPTY');
+    if (remainingSeated.length < 2 && room.phase === 'playing') {
       // Game ends - remaining player wins by default
-      if (remainingSeated === 1) {
-        const winnerPlayerId = room.seatedPlayerIds[0];
+      if (remainingSeated.length === 1) {
+        const winnerPlayerId = remainingSeated[0].playerId!;
         console.log(`[IdleTimeout] Only one player remaining, ${winnerPlayerId} wins by default`);
 
         clearTurnTimer(roomId);
@@ -544,10 +563,15 @@ function sendSyncState(roomId: string, playerId: string, ws: WebSocket): void {
     totalScoresObj[pid] = score;
   }
 
+  // Get seated player IDs from seats
+  const seatedPlayerIds = room.seats
+    .filter(s => s.playerId && s.status !== 'REMOVED')
+    .map(s => s.playerId!);
+
   // Calculate hands count (don't leak full hands)
   const handsCount: Record<string, number> = {};
-  if (room.hands && room.seatedPlayerIds) {
-    for (const pid of room.seatedPlayerIds) {
+  if (room.hands) {
+    for (const pid of seatedPlayerIds) {
       const hand = room.hands[pid];
       handsCount[pid] = hand ? hand.length : 0;
     }
@@ -556,18 +580,12 @@ function sendSyncState(roomId: string, playerId: string, ws: WebSocket): void {
   // Get player's hand (only for this player)
   const yourHand = room.hands && room.hands[playerId] ? [...room.hands[playerId]] : null;
 
-  // Get turn time remaining
-  const turnTimeRemaining = getTurnTimeRemaining(roomId);
-
-  // Get disconnected player IDs
-  const disconnectedPlayerIds = getDisconnectedPlayerIds(roomId);
-
   // Build SYNC_STATE message
   const syncState: SyncStateMessage = {
     type: 'SYNC_STATE',
     roomId,
     phase: room.phase,
-    seatedPlayerIds: room.seatedPlayerIds || [],
+    seats: getSeatsInfo(roomId),
     queuePlayerIds: [...room.queuePlayerIds],
     currentTurnPlayerId: room.currentTurnPlayerId,
     lastPlay: room.lastPlay || null,
@@ -577,13 +595,13 @@ function sendSyncState(roomId: string, playerId: string, ws: WebSocket): void {
     yourHand,
     starterPlayerId: room.starterPlayerId,
     starterReason: room.starterReason,
-    turnTimeRemaining: turnTimeRemaining ?? undefined,
-    disconnectedPlayerIds: disconnectedPlayerIds.length > 0 ? disconnectedPlayerIds : undefined,
+    turnId: room.turnId,
+    turnDeadlineAt: room.turnDeadlineAt,
     scoreLimit: room.scoreLimit,
   };
 
   ws.send(JSON.stringify(syncState));
-  app.log.info(`SYNC_STATE sent: roomId=${roomId}, playerId=${playerId}, phase=${room.phase}, turnTimeRemaining=${turnTimeRemaining}`);
+  app.log.info(`SYNC_STATE sent: roomId=${roomId}, playerId=${playerId}, phase=${room.phase}, turnId=${room.turnId}`);
 }
 
 /**
@@ -602,33 +620,32 @@ function broadcastRoomOverview(roomId: string): void {
     totalScoresObj[playerId] = score;
   }
 
-  // Get connected player IDs
-  const connectedPlayerIds = Array.from(room.connectionsByPlayerId.keys());
-
-  // Get disconnected player IDs
-  const disconnectedPlayerIds = getDisconnectedPlayerIds(roomId);
+  // Get seated player IDs from seats
+  const seatedPlayerIds = room.seats
+    .filter(s => s.playerId && s.status !== 'REMOVED')
+    .map(s => s.playerId!);
 
   // Build base overview
   const overview: RoomOverviewMessage = {
     type: 'ROOM_OVERVIEW',
     roomId,
     phase: room.phase,
-    seatedPlayerIds: room.seatedPlayerIds || [],
-    queuePlayerIds: [...room.queuePlayerIds], // Copy array
+    seats: getSeatsInfo(roomId),
+    queuePlayerIds: [...room.queuePlayerIds],
     totalScores: totalScoresObj,
     eliminated: Array.from(room.eliminated),
-    connectedPlayerIds,
-    disconnectedPlayerIds: disconnectedPlayerIds.length > 0 ? disconnectedPlayerIds : undefined,
   };
 
   // Add optional fields when in playing phase
   if (room.phase === 'playing') {
     overview.currentTurnPlayerId = room.currentTurnPlayerId;
+    overview.turnId = room.turnId;
+    overview.turnDeadlineAt = room.turnDeadlineAt;
 
     // Calculate hands count for seated players (don't leak full hands)
-    if (room.hands && room.seatedPlayerIds) {
+    if (room.hands) {
       const handsCount: Record<string, number> = {};
-      for (const playerId of room.seatedPlayerIds) {
+      for (const playerId of seatedPlayerIds) {
         const hand = room.hands[playerId];
         handsCount[playerId] = hand ? hand.length : 0;
       }
@@ -638,17 +655,6 @@ function broadcastRoomOverview(roomId: string): void {
     // Add passed player IDs
     if (room.passedSet) {
       overview.passedPlayerIds = Array.from(room.passedSet);
-    }
-
-    // Calculate dealer seat index (optional: starter is at index 0, dealer would be last)
-    // For now, we can set it to the starter's index or leave undefined
-    if (room.starterPlayerId && room.seatedPlayerIds) {
-      const starterIndex = room.seatedPlayerIds.indexOf(room.starterPlayerId);
-      if (starterIndex !== -1) {
-        // Dealer is typically the player before the starter (clockwise)
-        // In our game, starter is the first to act, so dealer would be the last player
-        overview.dealerSeatIndex = (starterIndex - 1 + room.seatedPlayerIds.length) % room.seatedPlayerIds.length;
-      }
     }
   }
 
@@ -1160,7 +1166,8 @@ async function checkAndHandleRoundEnd(roomId: string, winnerPlayerId: string): P
 
   // 4. Perform rotation and seat refilling
   const newSeatedPlayerIds = performRotation(room, winnerPlayerId);
-  room.seatedPlayerIds = newSeatedPlayerIds;
+  // Populate seats array with players (this also sets seatedPlayerIds for backwards compatibility)
+  seatPlayers(roomId, newSeatedPlayerIds);
 
   app.log.info(
     `Rotation: roomId=${roomId}, newSeated=${newSeatedPlayerIds.join(',')}, queue=${room.queuePlayerIds.join(',')}`
@@ -2282,11 +2289,11 @@ wss.on('connection', (ws: WebSocket) => {
       const { roomId, playerId } = authenticatedData;
       const room = getRoom(roomId);
 
-      // Mark player as disconnected (don't remove from game state)
+      // Mark player as OFFLINE (don't remove from game state)
       removeClientFromRoom(roomId, ws, playerId);
 
-      // Broadcast PLAYER_DISCONNECTED to all remaining clients (not PLAYER_LEFT - player can reconnect)
       if (room) {
+        // Broadcast PLAYER_DISCONNECTED to all remaining clients
         const playerDisconnectedMessage: PlayerDisconnectedMessage = {
           type: 'PLAYER_DISCONNECTED',
           roomId,
@@ -2299,7 +2306,25 @@ wss.on('connection', (ws: WebSocket) => {
           }
         }
 
-        // Set idle timer - player has 1 minute to reconnect
+        // If game is playing and it's this player's turn, advance turn immediately
+        if (room.phase === 'playing' && room.currentTurnPlayerId === playerId) {
+          app.log.info(`[Disconnect] Player ${playerId} disconnected while it was their turn - advancing turn`);
+          clearTurnTimer(roomId);
+
+          // Move to next active player
+          const nextPlayer = getNextActivePlayerForTurn(playerId, roomId);
+          if (nextPlayer) {
+            room.currentTurnPlayerId = nextPlayer;
+            // If this player was starter (no lastPlay), clear passes for new trick
+            if (!room.lastPlay) {
+              room.passedSet?.clear();
+            }
+            // Start new turn timer for next player
+            startTurnTimer(roomId);
+          }
+        }
+
+        // Set idle timer - player has 60 seconds to reconnect
         app.log.info(`[IdleTimer] Starting 60s idle timer for player ${playerId} in room ${roomId}`);
         setIdleTimer(roomId, playerId, () => {
           app.log.info(`[IdleTimer] Idle timer expired for player ${playerId} in room ${roomId} - removing from game`);
@@ -2321,13 +2346,13 @@ wss.on('connection', (ws: WebSocket) => {
             }
           }
         });
-      }
 
-      // Broadcast updates to show connection status change
-      broadcastRoomState(roomId);
-      broadcastRoomOverview(roomId);
-      if (room?.phase === 'playing') {
-        broadcastGameState(roomId);
+        // Broadcast updates to show OFFLINE status and turn change
+        broadcastRoomState(roomId);
+        broadcastRoomOverview(roomId);
+        if (room.phase === 'playing') {
+          broadcastGameState(roomId);
+        }
       }
 
       authenticated.delete(ws);

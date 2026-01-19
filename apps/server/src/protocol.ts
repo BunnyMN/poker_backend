@@ -92,10 +92,26 @@ export type StateMessage = {
   players: string[];
 };
 
+// Player status
+export type PlayerStatus = 'ACTIVE' | 'OFFLINE' | 'REMOVED';
+
+// Seat info for game state
+export type SeatInfo = {
+  seatIndex: number;
+  playerId: string | null;
+  status: PlayerStatus | 'EMPTY';
+  offlineSince: number | null;
+};
+
 export type RoomStateMessage = {
   type: 'ROOM_STATE';
   roomId: string;
-  players: Array<{ playerId: string; isReady: boolean }>;
+  players: Array<{
+    playerId: string;
+    isReady: boolean;
+    status?: PlayerStatus;
+    offlineSince?: number | null;
+  }>;
 };
 
 export type RoundStartMessage = {
@@ -125,13 +141,14 @@ export type LastPlay = {
 export type GameStateMessage = {
   type: 'GAME_STATE';
   roomId: string;
-  seatedPlayerIds: string[];
+  seats: SeatInfo[]; // 4 seats with player info and status
   currentTurnPlayerId: string;
   lastPlay: LastPlay | null;
   handsCount: Record<string, number>;
   passedPlayerIds: string[];
-  turnTimeRemaining?: number; // Milliseconds remaining for current turn
-  disconnectedPlayerIds?: string[]; // Players who are temporarily disconnected
+  // Turn tracking
+  turnId: string; // Unique ID for this turn (to prevent race conditions)
+  turnDeadlineAt: number; // Absolute timestamp when turn expires
 };
 
 export type PersonalStateMessage = {
@@ -200,23 +217,23 @@ export type RoomOverviewMessage = {
   type: 'ROOM_OVERVIEW';
   roomId: string;
   phase: 'lobby' | 'starting' | 'playing' | 'round_end';
-  seatedPlayerIds: string[]; // In seat order (clockwise)
+  seats: SeatInfo[]; // 4 seats with player info and status
   queuePlayerIds: string[]; // Front -> back order
-  dealerSeatIndex?: number; // Optional: index in seatedPlayerIds array
   currentTurnPlayerId?: string; // Only set when phase is 'playing'
   totalScores: Record<string, number>;
   eliminated: string[];
   handsCount?: Record<string, number>; // Only for seated players, only when phase is 'playing'
   passedPlayerIds?: string[]; // Only when phase is 'playing'
-  connectedPlayerIds?: string[]; // Players with active connections
-  disconnectedPlayerIds?: string[]; // Players who are temporarily disconnected
+  // Turn tracking (only when phase is 'playing')
+  turnId?: string;
+  turnDeadlineAt?: number;
 };
 
 export type SyncStateMessage = {
   type: 'SYNC_STATE';
   roomId: string;
   phase: 'lobby' | 'starting' | 'playing' | 'round_end';
-  seatedPlayerIds: string[];
+  seats: SeatInfo[]; // 4 seats with player info and status
   queuePlayerIds: string[];
   currentTurnPlayerId?: string;
   lastPlay: LastPlay | null;
@@ -226,8 +243,9 @@ export type SyncStateMessage = {
   yourHand: Card[] | null; // Only included for the requesting player
   starterPlayerId?: string;
   starterReason?: 'WINNER' | 'WEAKEST_SINGLE';
-  turnTimeRemaining?: number; // Milliseconds remaining for current turn
-  disconnectedPlayerIds?: string[]; // Players who are temporarily disconnected
+  // Turn tracking
+  turnId?: string; // Unique ID for current turn
+  turnDeadlineAt?: number; // Absolute timestamp when turn expires
   scoreLimit?: number; // Current score limit for the room
 };
 
