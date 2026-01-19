@@ -124,6 +124,7 @@ export type GameStateMessage = {
   handsCount: Record<string, number>;
   passedPlayerIds: string[];
   turnTimeRemaining?: number; // Milliseconds remaining for current turn
+  disconnectedPlayerIds?: string[]; // Players who are temporarily disconnected
 };
 
 export type PersonalStateMessage = {
@@ -157,6 +158,18 @@ export type PlayerJoinedMessage = {
   playerId: string;
 };
 
+export type PlayerDisconnectedMessage = {
+  type: 'PLAYER_DISCONNECTED';
+  roomId: string;
+  playerId: string;
+};
+
+export type PlayerReconnectedMessage = {
+  type: 'PLAYER_RECONNECTED';
+  roomId: string;
+  playerId: string;
+};
+
 export type RulesMessage = {
   type: 'RULES';
   roomId: string;
@@ -183,6 +196,7 @@ export type RoomOverviewMessage = {
   handsCount?: Record<string, number>; // Only for seated players, only when phase is 'playing'
   passedPlayerIds?: string[]; // Only when phase is 'playing'
   connectedPlayerIds?: string[]; // Players with active connections
+  disconnectedPlayerIds?: string[]; // Players who are temporarily disconnected
 };
 
 export type SyncStateMessage = {
@@ -200,6 +214,8 @@ export type SyncStateMessage = {
   starterPlayerId?: string;
   starterReason?: 'WINNER' | 'WEAKEST_SINGLE';
   turnTimeRemaining?: number; // Milliseconds remaining for current turn
+  disconnectedPlayerIds?: string[]; // Players who are temporarily disconnected
+  scoreLimit?: number; // Current score limit for the room
 };
 
 export type ActionErrorMessage = {
@@ -226,6 +242,8 @@ export type ServerMessage =
   | GameEndMessage
   | PlayerLeftMessage
   | PlayerJoinedMessage
+  | PlayerDisconnectedMessage
+  | PlayerReconnectedMessage
   | RulesMessage
   | ScoreUpdateMessage
   | RoomOverviewMessage

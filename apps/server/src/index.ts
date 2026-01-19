@@ -21,6 +21,8 @@ import {
   type GameEndMessage,
   type PlayerLeftMessage,
   type PlayerJoinedMessage,
+  type PlayerDisconnectedMessage,
+  type PlayerReconnectedMessage,
   type RulesMessage,
   type ScoreUpdateMessage,
   type RoomOverviewMessage,
@@ -258,6 +260,22 @@ function getNextActivePlayer(
 }
 
 /**
+ * Get disconnected player IDs (players who have disconnectedAt set)
+ */
+function getDisconnectedPlayerIds(roomId: string): string[] {
+  const room = getRoom(roomId);
+  if (!room) return [];
+
+  const disconnected: string[] = [];
+  for (const [playerId, data] of room.players.entries()) {
+    if (data.disconnectedAt) {
+      disconnected.push(playerId);
+    }
+  }
+  return disconnected;
+}
+
+/**
  * Broadcast GAME_STATE to all clients in room
  */
 function broadcastGameState(roomId: string): void {
@@ -288,6 +306,9 @@ function broadcastGameState(roomId: string): void {
   // Get turn time remaining
   const turnTimeRemaining = getTurnTimeRemaining(roomId);
 
+  // Get disconnected player IDs
+  const disconnectedPlayerIds = getDisconnectedPlayerIds(roomId);
+
   const gameStateMessage: GameStateMessage = {
     type: 'GAME_STATE',
     roomId,
@@ -297,6 +318,7 @@ function broadcastGameState(roomId: string): void {
     handsCount,
     passedPlayerIds,
     turnTimeRemaining: turnTimeRemaining ?? undefined,
+    disconnectedPlayerIds: disconnectedPlayerIds.length > 0 ? disconnectedPlayerIds : undefined,
   };
 
   const message = JSON.stringify(gameStateMessage);
@@ -533,6 +555,12 @@ function sendSyncState(roomId: string, playerId: string, ws: WebSocket): void {
   // Get player's hand (only for this player)
   const yourHand = room.hands && room.hands[playerId] ? [...room.hands[playerId]] : null;
 
+  // Get turn time remaining
+  const turnTimeRemaining = getTurnTimeRemaining(roomId);
+
+  // Get disconnected player IDs
+  const disconnectedPlayerIds = getDisconnectedPlayerIds(roomId);
+
   // Build SYNC_STATE message
   const syncState: SyncStateMessage = {
     type: 'SYNC_STATE',
@@ -548,10 +576,13 @@ function sendSyncState(roomId: string, playerId: string, ws: WebSocket): void {
     yourHand,
     starterPlayerId: room.starterPlayerId,
     starterReason: room.starterReason,
+    turnTimeRemaining: turnTimeRemaining ?? undefined,
+    disconnectedPlayerIds: disconnectedPlayerIds.length > 0 ? disconnectedPlayerIds : undefined,
+    scoreLimit: room.scoreLimit,
   };
 
   ws.send(JSON.stringify(syncState));
-  app.log.info(`SYNC_STATE sent: roomId=${roomId}, playerId=${playerId}`);
+  app.log.info(`SYNC_STATE sent: roomId=${roomId}, playerId=${playerId}, phase=${room.phase}, turnTimeRemaining=${turnTimeRemaining}`);
 }
 
 /**
@@ -573,6 +604,9 @@ function broadcastRoomOverview(roomId: string): void {
   // Get connected player IDs
   const connectedPlayerIds = Array.from(room.connectionsByPlayerId.keys());
 
+  // Get disconnected player IDs
+  const disconnectedPlayerIds = getDisconnectedPlayerIds(roomId);
+
   // Build base overview
   const overview: RoomOverviewMessage = {
     type: 'ROOM_OVERVIEW',
@@ -583,6 +617,7 @@ function broadcastRoomOverview(roomId: string): void {
     totalScores: totalScoresObj,
     eliminated: Array.from(room.eliminated),
     connectedPlayerIds,
+    disconnectedPlayerIds: disconnectedPlayerIds.length > 0 ? disconnectedPlayerIds : undefined,
   };
 
   // Add optional fields when in playing phase
@@ -1653,6 +1688,22 @@ wss.on('connection', (ws: WebSocket) => {
             app.log.info(`Reconnection: roomId=${message.roomId}, playerId=${playerId}`);
             // Clear idle timer since player reconnected
             clearIdleTimer(message.roomId, playerId);
+
+            // Broadcast PLAYER_RECONNECTED to all other clients
+            const room = getRoom(message.roomId);
+            if (room) {
+              const playerReconnectedMessage: PlayerReconnectedMessage = {
+                type: 'PLAYER_RECONNECTED',
+                roomId: message.roomId,
+                playerId,
+              };
+              const playerReconnectedMsg = JSON.stringify(playerReconnectedMessage);
+              for (const client of room.clients) {
+                if (client !== ws && client.readyState === WebSocket.OPEN) {
+                  client.send(playerReconnectedMsg);
+                }
+              }
+            }
           }
 
           // Send WELCOME
@@ -2055,17 +2106,17 @@ wss.on('connection', (ws: WebSocket) => {
       // Mark player as disconnected (don't remove from game state)
       removeClientFromRoom(roomId, ws, playerId);
 
-      // Broadcast PLAYER_LEFT to all remaining clients
+      // Broadcast PLAYER_DISCONNECTED to all remaining clients (not PLAYER_LEFT - player can reconnect)
       if (room) {
-        const playerLeftMessage: PlayerLeftMessage = {
-          type: 'PLAYER_LEFT',
+        const playerDisconnectedMessage: PlayerDisconnectedMessage = {
+          type: 'PLAYER_DISCONNECTED',
           roomId,
           playerId,
         };
-        const playerLeftMsg = JSON.stringify(playerLeftMessage);
+        const playerDisconnectedMsg = JSON.stringify(playerDisconnectedMessage);
         for (const client of room.clients) {
           if (client.readyState === WebSocket.OPEN) {
-            client.send(playerLeftMsg);
+            client.send(playerDisconnectedMsg);
           }
         }
 
@@ -2074,12 +2125,31 @@ wss.on('connection', (ws: WebSocket) => {
         setIdleTimer(roomId, playerId, () => {
           app.log.info(`[IdleTimer] Idle timer expired for player ${playerId} in room ${roomId} - removing from game`);
           handlePlayerIdleTimeout(roomId, playerId);
+
+          // Now broadcast PLAYER_LEFT since they're actually removed
+          const roomAfter = getRoom(roomId);
+          if (roomAfter) {
+            const playerLeftMessage: PlayerLeftMessage = {
+              type: 'PLAYER_LEFT',
+              roomId,
+              playerId,
+            };
+            const playerLeftMsg = JSON.stringify(playerLeftMessage);
+            for (const client of roomAfter.clients) {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(playerLeftMsg);
+              }
+            }
+          }
         });
       }
 
       // Broadcast updates to show connection status change
       broadcastRoomState(roomId);
       broadcastRoomOverview(roomId);
+      if (room?.phase === 'playing') {
+        broadcastGameState(roomId);
+      }
 
       authenticated.delete(ws);
 
