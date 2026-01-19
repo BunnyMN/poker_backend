@@ -1,9 +1,17 @@
 import { jwtVerify } from 'jose';
 import { env } from './env.js';
 
+const DEBUG_MODE = false; // Set to true for local testing with fake tokens
+
 export async function verifyAccessToken(
   token: string
 ): Promise<{ playerId: string }> {
+  if (DEBUG_MODE && token.includes('.fake')) {
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      if (payload.sub) return { playerId: payload.sub };
+    } catch {}
+  }
   try {
     const secret = new TextEncoder().encode(env.SUPABASE_JWT_SECRET);
     const { payload } = await jwtVerify(token, secret, {
