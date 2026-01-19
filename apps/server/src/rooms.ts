@@ -2,8 +2,8 @@ import { WebSocket } from 'ws';
 import type { RoomStateMessage, RoundStartMessage, Card, LastPlay } from './protocol.js';
 
 // Constants for timeouts
-export const IDLE_TIMEOUT_MS = 60 * 1000; // 1 minute to reconnect
-export const TURN_TIMEOUT_MS = 30 * 1000; // 30 seconds per turn
+export const IDLE_TIMEOUT_MS = 60 * 1000; // 1 minute to reconnect before auto stand-up
+export const TURN_TIMEOUT_MS = 20 * 1000; // 20 seconds per turn (auto-pass for disconnected players)
 
 export interface Room {
   clients: Set<WebSocket>;

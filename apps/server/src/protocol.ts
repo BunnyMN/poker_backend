@@ -52,6 +52,11 @@ export const StartGameMessageSchema = z.object({
   roomId: z.string(),
 });
 
+export const StandUpMessageSchema = z.object({
+  type: z.literal('STAND_UP'),
+  roomId: z.string(),
+});
+
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   HelloMessageSchema,
   PingMessageSchema,
@@ -61,6 +66,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SetRulesMessageSchema,
   SyncRequestMessageSchema,
   StartGameMessageSchema,
+  StandUpMessageSchema,
 ]);
 
 export type HelloMessage = z.infer<typeof HelloMessageSchema>;
@@ -70,6 +76,7 @@ export type PlayMessage = z.infer<typeof PlayMessageSchema>;
 export type PassMessage = z.infer<typeof PassMessageSchema>;
 export type SetRulesMessage = z.infer<typeof SetRulesMessageSchema>;
 export type SyncRequestMessage = z.infer<typeof SyncRequestMessageSchema>;
+export type StandUpMessage = z.infer<typeof StandUpMessageSchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 
 // Server -> Client messages
@@ -170,6 +177,12 @@ export type PlayerReconnectedMessage = {
   playerId: string;
 };
 
+export type PlayerStoodUpMessage = {
+  type: 'PLAYER_STOOD_UP';
+  roomId: string;
+  playerId: string;
+};
+
 export type RulesMessage = {
   type: 'RULES';
   roomId: string;
@@ -244,6 +257,7 @@ export type ServerMessage =
   | PlayerJoinedMessage
   | PlayerDisconnectedMessage
   | PlayerReconnectedMessage
+  | PlayerStoodUpMessage
   | RulesMessage
   | ScoreUpdateMessage
   | RoomOverviewMessage

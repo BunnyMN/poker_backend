@@ -23,6 +23,7 @@ import {
   type PlayerJoinedMessage,
   type PlayerDisconnectedMessage,
   type PlayerReconnectedMessage,
+  type PlayerStoodUpMessage,
   type RulesMessage,
   type ScoreUpdateMessage,
   type RoomOverviewMessage,
@@ -1633,6 +1634,156 @@ function handlePass(roomId: string, playerId: string, ws: WebSocket): void {
   }
 }
 
+/**
+ * Handle STAND_UP message - player voluntarily leaves the game (counted as loss)
+ */
+function handleStandUp(roomId: string, playerId: string, ws: WebSocket): void {
+  const room = getRoom(roomId);
+  if (!room) {
+    const error: ActionErrorMessage = {
+      type: 'ACTION_ERROR',
+      code: 'ROOM_NOT_FOUND',
+      message: 'Room not found',
+    };
+    ws.send(JSON.stringify(error));
+    return;
+  }
+
+  app.log.info(`STAND_UP: roomId=${roomId}, playerId=${playerId}`);
+
+  // Clear any idle timer for this player
+  clearIdleTimer(roomId, playerId);
+
+  // If game is in progress and it's this player's turn, handle turn transition first
+  if (room.phase === 'playing' && room.currentTurnPlayerId === playerId) {
+    clearTurnTimer(roomId);
+
+    // If there's a lastPlay, just move to next player
+    // If no lastPlay (they're starter), next player becomes starter
+    if (room.seatedPlayerIds && room.hands) {
+      const remainingSeated = room.seatedPlayerIds.filter(id => id !== playerId);
+      if (remainingSeated.length > 0) {
+        // Find next player in order
+        const currentIndex = room.seatedPlayerIds.indexOf(playerId);
+        let nextIndex = (currentIndex + 1) % room.seatedPlayerIds.length;
+        while (room.seatedPlayerIds[nextIndex] === playerId) {
+          nextIndex = (nextIndex + 1) % room.seatedPlayerIds.length;
+        }
+        room.currentTurnPlayerId = room.seatedPlayerIds[nextIndex];
+
+        // If player was starter (lastPlay is null), clear passes for new trick
+        if (!room.lastPlay) {
+          room.passedSet?.clear();
+        }
+      }
+    }
+  }
+
+  // Apply maximum penalty score (as if they had all 13 cards with multipliers)
+  // 13 cards = 13 * 2 (>=10 cards) * 3 (all 13) = 78 points
+  if (room.phase === 'playing' && room.seatedPlayerIds?.includes(playerId)) {
+    const hand = room.hands?.[playerId];
+    const remainingCards = hand ? hand.length : 13;
+    let penaltyPoints = remainingCards;
+    if (remainingCards >= 10) penaltyPoints *= 2;
+    if (remainingCards === 13) penaltyPoints *= 3;
+
+    const currentScore = room.totalScores.get(playerId) || 0;
+    room.totalScores.set(playerId, currentScore + penaltyPoints);
+    app.log.info(`STAND_UP penalty: playerId=${playerId}, cards=${remainingCards}, penalty=${penaltyPoints}, totalScore=${currentScore + penaltyPoints}`);
+  }
+
+  // Mark player as eliminated
+  room.eliminated.add(playerId);
+
+  // Remove player from seated players
+  if (room.seatedPlayerIds) {
+    room.seatedPlayerIds = room.seatedPlayerIds.filter(id => id !== playerId);
+  }
+
+  // Remove player's hand
+  if (room.hands && room.hands[playerId]) {
+    delete room.hands[playerId];
+  }
+
+  // Remove from passed set
+  room.passedSet?.delete(playerId);
+
+  // Remove from queue if present
+  const queueIndex = room.queuePlayerIds.indexOf(playerId);
+  if (queueIndex !== -1) {
+    room.queuePlayerIds.splice(queueIndex, 1);
+  }
+
+  // Broadcast PLAYER_STOOD_UP to all clients
+  const playerStoodUpMessage: PlayerStoodUpMessage = {
+    type: 'PLAYER_STOOD_UP',
+    roomId,
+    playerId,
+  };
+  const stoodUpMsg = JSON.stringify(playerStoodUpMessage);
+  for (const client of room.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(stoodUpMsg);
+    }
+  }
+
+  // Check if game should end (not enough seated players)
+  const remainingSeated = room.seatedPlayerIds?.length || 0;
+  if (remainingSeated < 2 && room.phase === 'playing') {
+    clearTurnTimer(roomId);
+
+    if (remainingSeated === 1 && room.seatedPlayerIds) {
+      // Last remaining player wins
+      const winnerPlayerId = room.seatedPlayerIds[0];
+      app.log.info(`Game ended due to STAND_UP: winner=${winnerPlayerId}`);
+
+      room.phase = 'round_end';
+
+      // Broadcast GAME_END
+      const gameEndMessage: GameEndMessage = {
+        type: 'GAME_END',
+        roomId,
+        winnerPlayerId,
+        totalScores: Object.fromEntries(room.totalScores),
+      };
+      const gameEndMsg = JSON.stringify(gameEndMessage);
+      for (const client of room.clients) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(gameEndMsg);
+        }
+      }
+    } else if (remainingSeated === 0) {
+      // No players left - end game with no winner
+      room.phase = 'lobby';
+    }
+  } else if (room.phase === 'playing') {
+    // Game continues - start timer for next player
+    startTurnTimer(roomId);
+  }
+
+  // Broadcast updates
+  broadcastRoomState(roomId);
+  broadcastRoomOverview(roomId);
+  if (room.phase === 'playing') {
+    broadcastGameState(roomId);
+  }
+
+  // Broadcast SCORE_UPDATE
+  const scoreUpdateMessage: ScoreUpdateMessage = {
+    type: 'SCORE_UPDATE',
+    roomId,
+    totalScores: Object.fromEntries(room.totalScores),
+    eliminated: Array.from(room.eliminated),
+  };
+  const scoreUpdateMsg = JSON.stringify(scoreUpdateMessage);
+  for (const client of room.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(scoreUpdateMsg);
+    }
+  }
+}
+
 wss.on('connection', (ws: WebSocket) => {
   let authenticatedData: { roomId: string; playerId: string } | undefined;
 
@@ -2047,6 +2198,34 @@ wss.on('connection', (ws: WebSocket) => {
           }
         }
 
+        return;
+      }
+
+      // Handle STAND_UP
+      if (message.type === 'STAND_UP') {
+        // Must be authenticated first
+        if (!authenticatedData) {
+          const errorMessage: ActionErrorMessage = {
+            type: 'ACTION_ERROR',
+            code: 'NOT_AUTHENTICATED',
+            message: 'Must send HELLO first',
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        // Verify roomId matches authenticated room
+        if (message.roomId !== authenticatedData.roomId) {
+          const errorMessage: ActionErrorMessage = {
+            type: 'ACTION_ERROR',
+            code: 'INVALID_ROOM',
+            message: 'Room ID does not match authenticated room',
+          };
+          ws.send(JSON.stringify(errorMessage));
+          return;
+        }
+
+        handleStandUp(message.roomId, authenticatedData.playerId, ws);
         return;
       }
 
